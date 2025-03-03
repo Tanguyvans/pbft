@@ -114,14 +114,51 @@ def add_new_node(nodes, next_node_id, host='127.0.0.1', base_port=8000):
         'port': port
     }
     
+    # Get all existing node configs
+    all_node_configs = []
+    for node in nodes:
+        if node.running:  # Only include running nodes
+            all_node_configs.extend(node.nodes)
+    
+    # Remove duplicates
+    unique_configs = []
+    seen_ids = set()
+    for config in all_node_configs:
+        if config['id'] not in seen_ids:
+            unique_configs.append(config)
+            seen_ids.add(config['id'])
+    
     # Create the new node
-    node = PBFTNode(next_node_id, host, port, [n.nodes[i] for n in nodes for i in range(len(n.nodes))])
+    node = PBFTNode(next_node_id, host, port, unique_configs)
+    
+    # Find the current primary node
+    primary_node = None
+    current_view = 0
+    for n in nodes:
+        if n.running and n.pbft.is_primary_node():
+            primary_node = n
+            current_view = n.pbft.view
+            break
     
     # Add the new node to all existing nodes
     for existing_node in nodes:
-        existing_node.add_node(node_config)
+        if existing_node.running:
+            existing_node.add_node(next_node_id, host, port)
     
-    # Start the new node
+    # Explicitly sync the view from the primary
+    if primary_node:
+        logger.info(f"Syncing view {current_view} from primary node {primary_node.node_id} to new node {next_node_id}")
+        view_sync = {
+            'type': 'view-sync',
+            'sender': primary_node.node_id,
+            'view': current_view,
+            'primary': primary_node.node_id
+        }
+        primary_node.send_message({'id': next_node_id, 'host': host, 'port': port}, view_sync)
+        
+        # Wait a bit for the view sync to take effect
+        time.sleep(1)
+    
     logger.info(f"Started new node {next_node_id} on {host}:{port}")
     
     return node, next_node_id + 1

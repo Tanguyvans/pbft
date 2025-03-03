@@ -149,6 +149,10 @@ class PBFTNode:
             self.handle_block_sync(message)
         elif msg_type == 'state-sync':
             self.handle_state_sync(message)
+        elif msg_type == 'view-sync':
+            self.handle_view_sync(message)
+        elif msg_type == 'node-join':
+            self.handle_node_join(message)
         elif msg_type == 'ping':
             self.handle_ping(message)
         else:
@@ -459,71 +463,148 @@ class PBFTNode:
         # Since we don't have the client socket directly, we'll need to
         # modify the handle_client method to keep the socket open for response
     
-    def add_node(self, node_config: Dict):
+    def add_node(self, node_id: int, host: str, port: int):
         """Add a new node to the network"""
-        # Check if node already exists
+        # Check if the node already exists
         for node in self.nodes:
-            if node['id'] == node_config['id']:
-                self.logger.warning(f"Node {node_config['id']} already exists in the network")
-                return False
+            if node['id'] == node_id:
+                self.logger.warning(f"Node {node_id} already exists in the network")
+                return
         
-        # Add the node to our list
-        self.nodes.append(node_config)
-        self.logger.info(f"Added node {node_config['id']} to the network")
+        # Add the node to the configuration
+        new_node = {'id': node_id, 'host': host, 'port': port}
+        self.nodes.append(new_node)
         
-        # Update PBFT total nodes
+        # Update PBFT with new node count
         self.pbft.update_total_nodes(len(self.nodes))
         
-        # Send blockchain sync to the new node
-        self.sync_blockchain_to_node(node_config)
-        
-        return True
-
-    def sync_blockchain_to_node(self, target_node: Dict):
-        """Send the entire blockchain to a new node"""
-        self.logger.info(f"Syncing blockchain to node {target_node['id']}")
-        
-        with self.blockchain_lock:
+        # If this is the primary node, sync blockchain and state to the new node
+        if self.pbft.is_primary_node():
+            self.logger.info(f"Syncing blockchain to node {node_id}")
+            
+            # First, send the current view to ensure the new node has the correct view
+            view_sync = {
+                'type': 'view-sync',
+                'sender': self.node_id,
+                'view': self.pbft.view,
+                'primary': self.pbft.view % len(self.nodes)
+            }
+            self.send_message(new_node, view_sync)
+            
+            # Then sync all blocks
             for block in self.blockchain.blocks:
                 block_sync = {
                     'type': 'block-sync',
                     'sender': self.node_id,
                     'block': block.to_dict(),
-                    'sequence': block.data.get('sequence', 0),
-                    'view': block.data.get('view', 0),
-                    'is_sync': True  # Flag to indicate this is part of initial sync
+                    'sequence': block.index,
+                    'view': self.pbft.view  # Include current view
                 }
-                self.send_message(target_node, block_sync)
-        
-        # Send current state
-        with self.state_lock:
+                self.send_message(new_node, block_sync)
+            
+            # Sync state
             state_sync = {
                 'type': 'state-sync',
                 'sender': self.node_id,
-                'state': self.state.copy(),
+                'state': self.state,
                 'last_executed_seq': self.last_executed_seq
             }
-            self.send_message(target_node, state_sync)
+            self.send_message(new_node, state_sync)
+            
+            self.logger.info(f"Blockchain and state sync to node {node_id} completed")
+
+    def handle_view_sync(self, message: Dict):
+        """Handle view synchronization from the primary node"""
+        sender = message.get('sender')
+        view = message.get('view')
+        primary = message.get('primary')
         
-        self.logger.info(f"Blockchain and state sync to node {target_node['id']} completed")
+        self.logger.info(f"Received view sync from node {sender}: view={view}, primary={primary}")
+        
+        # Update our PBFT view
+        self.pbft.view = view
+        
+        # Update primary status based on the new view
+        new_primary_id = view % len(self.nodes)
+        self.pbft._is_primary = (self.node_id == new_primary_id)
+        
+        self.logger.info(f"Updated view to {view}, primary status: {self.pbft.is_primary_node()}")
+        
+        # If we're joining after a view change, we need to notify all nodes about our presence
+        if view > 0:
+            self.logger.info(f"Joining after view change (view={view}), notifying all nodes")
+            join_msg = {
+                'type': 'node-join',
+                'sender': self.node_id,
+                'view': view
+            }
+            self.broadcast(join_msg)
 
     def handle_state_sync(self, message: Dict):
         """Handle state synchronization from another node"""
         sender = message.get('sender')
         state = message.get('state')
         last_executed_seq = message.get('last_executed_seq')
+        view = message.get('view', 0)
         
         self.logger.info(f"Received state sync from node {sender}")
         
-        # Only accept state from the primary node
-        primary_id = self.pbft.view % len(self.nodes)
-        if sender != primary_id:
-            self.logger.warning(f"Ignoring state sync from non-primary node {sender}")
-            return
+        # Update our view if needed
+        if view > self.pbft.view:
+            self.logger.info(f"Updating view from {self.pbft.view} to {view}")
+            self.pbft.view = view
+            
+            # Update primary status
+            new_primary_id = view % len(self.nodes)
+            self.pbft._is_primary = (self.node_id == new_primary_id)
+            
+            self.logger.info(f"Updated primary status: {self.pbft.is_primary_node()}")
         
         # Update our state
         with self.state_lock:
             self.state = state
             self.last_executed_seq = last_executed_seq
             self.logger.info(f"Updated state from primary: {self.state}")
-            self.logger.info(f"Updated last_executed_seq to {last_executed_seq}") 
+            self.logger.info(f"Updated last_executed_seq to {last_executed_seq}")
+
+    def handle_node_join(self, message: Dict):
+        """Handle notification that a new node has joined the network"""
+        sender = message.get('sender')
+        view = message.get('view')
+        
+        self.logger.info(f"Node {sender} has joined the network with view {view}")
+        
+        # If we're the primary, send our current state to the new node
+        if self.pbft.is_primary_node():
+            self.logger.info(f"Sending current state to new node {sender}")
+            
+            # Find the node in our configuration
+            target_node = None
+            for node in self.nodes:
+                if node['id'] == sender:
+                    target_node = node
+                    break
+            
+            if target_node:
+                # Send current state
+                state_sync = {
+                    'type': 'state-sync',
+                    'sender': self.node_id,
+                    'state': self.state,
+                    'last_executed_seq': self.last_executed_seq,
+                    'view': self.pbft.view
+                }
+                self.send_message(target_node, state_sync)
+                
+                # Send all blocks
+                for block in self.blockchain.blocks:
+                    block_sync = {
+                        'type': 'block-sync',
+                        'sender': self.node_id,
+                        'block': block.to_dict(),
+                        'sequence': block.index,
+                        'view': self.pbft.view
+                    }
+                    self.send_message(target_node, block_sync)
+                
+                self.logger.info(f"Sent state and blockchain to new node {sender}") 
