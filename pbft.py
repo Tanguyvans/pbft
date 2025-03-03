@@ -14,6 +14,7 @@ class PBFT:
         self.view = 0  # Current view number
         self.sequence_number = 0  # Sequence number for requests
         self.sequence_lock = threading.Lock()
+        self._is_primary = (self.node_id == self.view % self.total_nodes)  # Use an underscore for the internal attribute
         
         # Message logs
         self.request_log = {}  # Store client requests
@@ -45,12 +46,16 @@ class PBFT:
         
         self.logger.info(f"PBFT initialized with {total_nodes} nodes, f={self.f}")
     
-    @property
-    def is_primary(self) -> bool:
+    def is_primary_node(self) -> bool:
         """Check if this node is the primary for the current view"""
-        primary = self.node_id == (self.view % self.total_nodes)
+        primary = self._is_primary
         self.logger.debug(f"Checking if node {self.node_id} is primary: {primary} (view: {self.view}, total: {self.total_nodes})")
         return primary
+    
+    def set_primary_status(self, status):
+        """Set the primary status"""
+        self._is_primary = status
+        self.logger.info(f"Primary status updated to: {self._is_primary}")
     
     def store_request(self, request_id: str, request: Dict):
         """Store a client request"""
@@ -58,7 +63,7 @@ class PBFT:
     
     def start_consensus(self, request_id: str):
         """Start the consensus process for a request (primary only)"""
-        if not self.is_primary:
+        if not self.is_primary_node():
             self.logger.warning("Non-primary node tried to start consensus")
             return
         
@@ -252,16 +257,22 @@ class PBFT:
         self.request_log[request_id] = request
         
         # If this node is the primary, start the consensus process
-        if self.is_primary:
+        if self.is_primary_node():
             self.logger.info(f"Primary node initiating consensus for request {request_id}")
             
-            # Get the next sequence number
+            # Get the next sequence number for this view
             with self.sequence_lock:
-                # Start from sequence 1 (not 0)
-                if self.sequence_number == 0:
-                    self.sequence_number = 1
-                seq_num = self.sequence_number
-                self.sequence_number += 1
+                # Start from sequence 1 (not 0) for each view
+                view_key = f"view_{self.view}"
+                if not hasattr(self, 'view_sequence_numbers'):
+                    self.view_sequence_numbers = {}
+                
+                if view_key not in self.view_sequence_numbers:
+                    self.view_sequence_numbers[view_key] = 1
+                
+                seq_num = self.view_sequence_numbers[view_key]
+                self.view_sequence_numbers[view_key] += 1
+                self.sequence_number = seq_num  # Also update the global sequence number
             
             # Create pre-prepare message
             pre_prepare = {
@@ -282,7 +293,7 @@ class PBFT:
             self.logger.info(f"Sent pre-prepare for request {request_id}, seq {seq_num}")
             
             # Primary also processes its own pre-prepare message
-            self.process_pre_prepare(pre_prepare) 
+            self.process_pre_prepare(pre_prepare)
 
     def reset_view_change_timer(self):
         """Reset the view change timer"""
@@ -290,7 +301,7 @@ class PBFT:
             self.view_change_timer.cancel()
         
         # Only non-primary nodes need to monitor for primary failure
-        if not self.is_primary:
+        if not self.is_primary_node():
             self.view_change_timer = threading.Timer(self.view_change_timeout, self.initiate_view_change)
             self.view_change_timer.daemon = True
             self.view_change_timer.start()
@@ -356,12 +367,17 @@ class PBFT:
                 })
         return prepared
 
-    def process_view_change(self, message: Dict):
-        """Process view-change message"""
+    def process_view_change(self, message):
+        """Process a view-change message"""
         sender = message.get('sender')
         new_view = message.get('new_view')
         
         self.logger.info(f"Processing view-change from {sender} for view {new_view}")
+        
+        # Verify the message
+        if new_view <= self.view:
+            self.logger.warning(f"Ignoring view-change for old or current view: {new_view}")
+            return
         
         # Store the view-change message
         if new_view not in self.view_change_log:
@@ -369,10 +385,29 @@ class PBFT:
         self.view_change_log[new_view][sender] = message
         
         # Check if we have enough view-change messages (2f+1)
-        if len(self.view_change_log.get(new_view, {})) >= 2*self.f + 1:
-            # If this node is the primary for the new view, send new-view message
-            if self.node_id == (new_view % self.total_nodes):
-                self.send_new_view(new_view)
+        if len(self.view_change_log[new_view]) >= 2 * self.f + 1:
+            self.logger.info(f"Received enough view-change messages for view {new_view}")
+            
+            # If this node is the new primary, send new-view message
+            new_primary = new_view % self.total_nodes
+            if self.node_id == new_primary:
+                self.logger.info(f"I am the new primary for view {new_view}")
+                
+                # Create new-view message
+                new_view_msg = {
+                    'type': 'new-view',
+                    'view': new_view,
+                    'sender': self.node_id,
+                    'view_changes': list(self.view_change_log[new_view].keys())
+                }
+                
+                # Broadcast new-view message
+                self.node.broadcast(new_view_msg)
+                
+                # Install the new view
+                self.install_new_view(new_view)
+            else:
+                self.logger.info(f"Node {new_primary} should be the new primary for view {new_view}")
 
     def send_new_view(self, new_view: int):
         """Send new-view message (only called by the new primary)"""
@@ -419,35 +454,31 @@ class PBFT:
         # Update to the new view
         self.install_new_view(new_view)
 
-    def install_new_view(self, new_view: int):
-        """Install the new view"""
+    def install_new_view(self, new_view):
+        """Install a new view"""
         self.logger.info(f"Installing new view: {new_view}")
-        old_view = self.view
+        
+        # Update the view number
         self.view = new_view
         
-        # Reset sequence number when view changes
-        with self.sequence_lock:
-            self.sequence_number = 0
-            # Don't reset global_sequence
+        # Calculate the new primary
+        new_primary_id = new_view % self.total_nodes
         
-        self.changing_view = False
+        # Update primary status
+        self._is_primary = (self.node_id == new_primary_id)
         
-        # Reset view change timer
-        self.reset_view_change_timer()
+        self.logger.info(f"Primary status after view change: {self._is_primary}")
         
-        # Start heartbeat timer if this node is the new primary
-        self.start_heartbeat_timer()
-        
-        # Log primary status
-        self.logger.info(f"Primary status after view change: {self.is_primary}")
+        # Reset sequence number for the new view
+        # Don't reset sequence number, just track it per view
+        # self.sequence_number = 0
         
         # Notify the node about the view change
-        self.node.on_view_change(old_view, new_view)
+        self.node.on_view_change(new_view)
         
-        # If this node is the new primary, it should re-issue pre-prepares for
-        # any prepared requests from the previous view
-        if self.is_primary:
-            self.reissue_prepares()
+        # Clear view change logs for this view
+        if new_view in self.view_change_log:
+            del self.view_change_log[new_view]
 
     def reissue_prepares(self):
         """Re-issue pre-prepares for prepared requests from previous view"""
@@ -462,14 +493,14 @@ class PBFT:
             self.heartbeat_timer.cancel()
         
         # Only primary nodes need to send heartbeats
-        if self.is_primary:
+        if self.is_primary_node():
             self.heartbeat_timer = threading.Timer(self.heartbeat_interval, self.send_heartbeat)
             self.heartbeat_timer.daemon = True
             self.heartbeat_timer.start()
 
     def send_heartbeat(self):
         """Send a heartbeat message to all nodes"""
-        if not self.is_primary:
+        if not self.is_primary_node():
             return
         
         heartbeat_msg = {
@@ -491,4 +522,18 @@ class PBFT:
             self.view_change_timer.cancel()
         
         if self.heartbeat_timer:
-            self.heartbeat_timer.cancel() 
+            self.heartbeat_timer.cancel()
+
+    def update_total_nodes(self, total_nodes: int):
+        """Update the total number of nodes in the network"""
+        self.logger.info(f"Updating total nodes from {self.total_nodes} to {total_nodes}")
+        self.total_nodes = total_nodes
+        
+        # Recalculate f (max number of faulty nodes)
+        self.f = (self.total_nodes - 1) // 3
+        self.logger.info(f"Updated f to {self.f}")
+        
+        # Check if we need to change view due to new node count
+        primary_id = self.view % self.total_nodes
+        self._is_primary = (self.node_id == primary_id)
+        self.logger.info(f"Primary status after node update: {self._is_primary}") 

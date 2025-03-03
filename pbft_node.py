@@ -71,7 +71,7 @@ class PBFTNode:
         self.execution_thread.start()
         
         self.logger.info(f"Node {self.node_id} started on {self.host}:{self.port}")
-        self.logger.info(f"Primary status: {self.pbft.is_primary}")
+        self.logger.info(f"Primary status: {self.pbft.is_primary_node()}")
         self.logger.info(f"Genesis block hash: {genesis_block.current_hash}")
     
     def start_server(self):
@@ -147,6 +147,8 @@ class PBFTNode:
             self.pbft.process_message(message)
         elif msg_type == 'block-sync':
             self.handle_block_sync(message)
+        elif msg_type == 'state-sync':
+            self.handle_state_sync(message)
         elif msg_type == 'ping':
             self.handle_ping(message)
         else:
@@ -175,7 +177,7 @@ class PBFTNode:
         })
         
         # If this node is the primary, initiate the PBFT protocol
-        if self.pbft.is_primary:
+        if self.pbft.is_primary_node():
             self.pbft.start_consensus(request_id)
     
     def execute_operation(self, sequence: int, request: Dict):
@@ -243,7 +245,7 @@ class PBFTNode:
                         break
                 
                 if not block_exists:
-                    if self.pbft.is_primary:
+                    if self.pbft.is_primary_node():
                         self.logger.info(f"Primary node creating block for {block_id}")
                     
                     new_block = self.blockchain.create_block(
@@ -265,7 +267,7 @@ class PBFTNode:
                     self.logger.info(f"Created block #{new_block.index} for {block_id}, hash: {new_block.current_hash[:10]}...")
                     
                     # If this node is the primary, broadcast the new block to all nodes
-                    if self.pbft.is_primary:
+                    if self.pbft.is_primary_node():
                         self.logger.info(f"Broadcasting block #{new_block.index} to all nodes")
                         block_sync = {
                             'type': 'block-sync',
@@ -291,15 +293,20 @@ class PBFTNode:
                 # Get the next item from the queue
                 seq, request = self.execution_queue.get()
                 
+                # Get the view for this request
+                view = request.get('view', self.pbft.view)
+                
                 # Check if we've already executed this request
                 request_id = request.get('request_id', '')
                 if request_id and request_id in self.executed_requests:
                     self.logger.info(f"Request {request_id} already executed, skipping")
                     continue
                 
-                # Check if we've already executed this sequence
-                if seq <= self.last_executed_seq:
-                    self.logger.info(f"Sequence {seq} already executed, skipping")
+                # Check if we've already executed this sequence in this view
+                # We need to track executed sequences per view
+                view_seq_key = f"v{view}-s{seq}"
+                if hasattr(self, 'executed_view_seqs') and view_seq_key in self.executed_view_seqs:
+                    self.logger.info(f"Sequence {seq} in view {view} already executed, skipping")
                     continue
                 
                 # Execute the operation
@@ -307,13 +314,18 @@ class PBFTNode:
                 result = self.execute_operation(seq, {
                     'operation': operation,
                     'request_id': request_id,
-                    'view': self.pbft.view  # Include the view
+                    'view': view
                 })
                 
                 # Mark as executed
                 self.last_executed_seq = seq
-                if request_id:  # Only add to executed_requests if request_id is not empty
+                if request_id:
                     self.executed_requests.add(request_id)
+                
+                # Track executed sequences per view
+                if not hasattr(self, 'executed_view_seqs'):
+                    self.executed_view_seqs = set()
+                self.executed_view_seqs.add(view_seq_key)
                 
             except Exception as e:
                 self.logger.error(f"Error processing execution queue: {e}")
@@ -327,7 +339,7 @@ class PBFTNode:
         
         # Only accept blocks from the primary node
         primary_id = self.pbft.view % len(self.nodes)
-        if sender != primary_id:
+        if sender != primary_id and not self.pbft.is_primary_node():
             self.logger.warning(f"Ignoring block from non-primary node {sender}")
             return
         
@@ -419,33 +431,17 @@ class PBFTNode:
             'view': self.pbft.view  # Include the view
         }))
     
-    def on_view_change(self, old_view, new_view):
-        """Called by PBFT when a view change occurs"""
-        self.logger.info(f"View changed from {old_view} to {new_view}")
+    def on_view_change(self, new_view):
+        """Handle view change notification from PBFT"""
+        self.logger.info(f"View changed to {new_view}")
         
-        # Create a mapping of executed sequences for the old view
-        with self.state_lock:
-            # Store the highest sequence number executed in the old view
-            if not hasattr(self, 'view_executed_seqs'):
-                self.view_executed_seqs = {}
-            
-            self.view_executed_seqs[old_view] = self.last_executed_seq
-            
-            # Reset the last executed sequence for the new view
-            # This is critical - we need to track execution separately for each view
-            self.last_executed_seq = 0
-            
-            self.logger.info(f"Reset last executed sequence to 0 for view {new_view}")
-            self.logger.info(f"View execution history: {self.view_executed_seqs}")
-        
-        # Clear the execution queue
-        while not self.execution_queue.empty():
-            try:
-                self.execution_queue.get_nowait()
-            except queue.Empty:
-                break
-        
-        # Don't clear executed_requests - we still want to avoid duplicate executions
+        # If this node is the new primary, start sending heartbeats
+        if self.pbft.is_primary_node():
+            self.logger.info(f"This node is now the primary for view {new_view}")
+            # Start heartbeat timer if not already running
+            self.pbft.start_heartbeat_timer()
+        else:
+            self.logger.info(f"This node is a backup for view {new_view}")
     
     def handle_ping(self, message: Dict):
         """Handle ping messages from clients"""
@@ -455,10 +451,79 @@ class PBFTNode:
         # Send response with primary status
         response = {
             'type': 'pong',
-            'is_primary': self.pbft.is_primary,
+            'is_primary': self.pbft.is_primary_node(),
             'view': self.pbft.view,
             'timestamp': timestamp
         }
         
         # Since we don't have the client socket directly, we'll need to
-        # modify the handle_client method to keep the socket open for response 
+        # modify the handle_client method to keep the socket open for response
+    
+    def add_node(self, node_config: Dict):
+        """Add a new node to the network"""
+        # Check if node already exists
+        for node in self.nodes:
+            if node['id'] == node_config['id']:
+                self.logger.warning(f"Node {node_config['id']} already exists in the network")
+                return False
+        
+        # Add the node to our list
+        self.nodes.append(node_config)
+        self.logger.info(f"Added node {node_config['id']} to the network")
+        
+        # Update PBFT total nodes
+        self.pbft.update_total_nodes(len(self.nodes))
+        
+        # Send blockchain sync to the new node
+        self.sync_blockchain_to_node(node_config)
+        
+        return True
+
+    def sync_blockchain_to_node(self, target_node: Dict):
+        """Send the entire blockchain to a new node"""
+        self.logger.info(f"Syncing blockchain to node {target_node['id']}")
+        
+        with self.blockchain_lock:
+            for block in self.blockchain.blocks:
+                block_sync = {
+                    'type': 'block-sync',
+                    'sender': self.node_id,
+                    'block': block.to_dict(),
+                    'sequence': block.data.get('sequence', 0),
+                    'view': block.data.get('view', 0),
+                    'is_sync': True  # Flag to indicate this is part of initial sync
+                }
+                self.send_message(target_node, block_sync)
+        
+        # Send current state
+        with self.state_lock:
+            state_sync = {
+                'type': 'state-sync',
+                'sender': self.node_id,
+                'state': self.state.copy(),
+                'last_executed_seq': self.last_executed_seq
+            }
+            self.send_message(target_node, state_sync)
+        
+        self.logger.info(f"Blockchain and state sync to node {target_node['id']} completed")
+
+    def handle_state_sync(self, message: Dict):
+        """Handle state synchronization from another node"""
+        sender = message.get('sender')
+        state = message.get('state')
+        last_executed_seq = message.get('last_executed_seq')
+        
+        self.logger.info(f"Received state sync from node {sender}")
+        
+        # Only accept state from the primary node
+        primary_id = self.pbft.view % len(self.nodes)
+        if sender != primary_id:
+            self.logger.warning(f"Ignoring state sync from non-primary node {sender}")
+            return
+        
+        # Update our state
+        with self.state_lock:
+            self.state = state
+            self.last_executed_seq = last_executed_seq
+            self.logger.info(f"Updated state from primary: {self.state}")
+            self.logger.info(f"Updated last_executed_seq to {last_executed_seq}") 

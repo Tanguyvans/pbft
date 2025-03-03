@@ -28,16 +28,103 @@ def send_concurrent_requests(clients, operations):
     logger.info("All concurrent requests sent")
 
 def simulate_primary_failure(nodes):
-    """Simulate primary node failure"""
-    # Find the current primary
+    """Simulate primary node failure and trigger view change"""
+    logger.info("Simulating primary node failure...")
+    
+    # Find the current primary node
+    primary_node = None
     for node in nodes:
-        if node.pbft.is_primary:
-            primary_id = node.node_id
-            logger.info(f"Simulating failure of primary node {primary_id}")
-            # Stop the node
-            node.stop()
-            return primary_id
-    return None
+        if node.pbft.is_primary_node():
+            primary_node = node
+            break
+    
+    if not primary_node:
+        logger.error("No primary node found!")
+        return None
+    
+    logger.info(f"Current primary is node {primary_node.node_id}")
+    
+    # Stop the primary node
+    primary_node.running = False
+    primary_node.server_socket.close()
+    logger.info(f"Primary node {primary_node.node_id} stopped")
+    
+    # Explicitly trigger view change on all other nodes
+    current_view = primary_node.pbft.view
+    new_view = current_view + 1
+    logger.info(f"Triggering view change to view {new_view} on all nodes")
+    
+    # Create a view-change message
+    view_change_msgs = []
+    
+    for node in nodes:
+        if node != primary_node and node.running:
+            # Force the node to initiate a view change
+            try:
+                # Create a view-change message
+                view_change_msg = {
+                    'type': 'view-change',
+                    'new_view': new_view,
+                    'last_seq': node.pbft.sequence_number,
+                    'sender': node.node_id,
+                    'prepared': {}  # Simplified for this example
+                }
+                view_change_msgs.append(view_change_msg)
+                
+                # Process it locally
+                node.pbft.process_message(view_change_msg)
+                logger.info(f"Triggered view change on node {node.node_id}")
+            except Exception as e:
+                logger.error(f"Error triggering view change on node {node.node_id}: {e}")
+    
+    # Broadcast all view-change messages to all nodes
+    for node in nodes:
+        if node != primary_node and node.running:
+            for msg in view_change_msgs:
+                try:
+                    node.pbft.process_message(msg)
+                except Exception as e:
+                    logger.error(f"Error processing view-change on node {node.node_id}: {e}")
+    
+    # Wait for view change to complete
+    logger.info("Waiting for view change to complete...")
+    time.sleep(10)
+    
+    # Find the new primary
+    new_primary = None
+    for node in nodes:
+        if node != primary_node and node.running and node.pbft.is_primary_node():
+            new_primary = node
+            break
+    
+    if new_primary:
+        logger.info(f"New primary is node {new_primary.node_id}")
+    else:
+        logger.warning("No new primary node found after view change")
+    
+    return primary_node
+
+def add_new_node(nodes, next_node_id, host='127.0.0.1', base_port=8000):
+    """Add a new node to the PBFT network"""
+    # Create node configuration
+    port = base_port + next_node_id
+    node_config = {
+        'id': next_node_id,
+        'host': host,
+        'port': port
+    }
+    
+    # Create the new node
+    node = PBFTNode(next_node_id, host, port, [n.nodes[i] for n in nodes for i in range(len(n.nodes))])
+    
+    # Add the new node to all existing nodes
+    for existing_node in nodes:
+        existing_node.add_node(node_config)
+    
+    # Start the new node
+    logger.info(f"Started new node {next_node_id} on {host}:{port}")
+    
+    return node, next_node_id + 1
 
 def main():
     # Define node configurations
@@ -85,6 +172,7 @@ def main():
     
     # Interactive mode
     try:
+        next_node_id = num_nodes
         while True:
             print("\nPBFT Blockchain Network Menu:")
             print("1. Add a new element to the chain")
@@ -96,8 +184,9 @@ def main():
             print("7. Save blockchain to file")
             print("8. Exit")
             print("9. Simulate primary node failure")
+            print("10. Add a new node to the network")
             
-            choice = input("Enter your choice (1-9): ")
+            choice = input("Enter your choice (1-10): ")
             
             if choice == '1':
                 operation_type = input("Enter operation type (SET/GET/DELETE): ").upper()
@@ -273,13 +362,13 @@ def main():
             elif choice == '9':
                 failed_primary = simulate_primary_failure(nodes)
                 if failed_primary is not None:
-                    print(f"Primary node {failed_primary} has been stopped. Waiting for view change...")
+                    print(f"Primary node {failed_primary.node_id} has been stopped. Waiting for view change...")
                     time.sleep(10)  # Wait for view change to occur
                     
                     # Check new primary
                     new_primary = None
                     for i, node in enumerate(nodes):
-                        if i != failed_primary and node.pbft.is_primary:
+                        if i != failed_primary.node_id and node.pbft.is_primary_node():
                             new_primary = i
                             break
                     
@@ -290,8 +379,13 @@ def main():
                 else:
                     print("Could not identify primary node")
             
+            elif choice == '10':
+                new_node, next_node_id = add_new_node(nodes, next_node_id)
+                nodes.append(new_node)
+                print(f"Added new node with ID {new_node.node_id}")
+            
             else:
-                print("Invalid choice. Please enter a number between 1 and 9.")
+                print("Invalid choice. Please enter a number between 1 and 10.")
     
     except KeyboardInterrupt:
         pass
