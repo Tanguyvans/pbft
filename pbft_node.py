@@ -9,6 +9,7 @@ import logging
 import queue
 from blockchain import Blockchain
 from block import Block
+from pbft import PBFT
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -21,20 +22,12 @@ class PBFTNode:
         self.nodes = nodes_config
         self.logger = logging.getLogger(f"Node-{self.node_id}")
         
-        # PBFT state
-        self.view = 0  # Current view number
-        self.sequence_number = 0  # Sequence number for requests
-        self.is_primary = (self.node_id == self.view % len(self.nodes))
+        # Initialize the PBFT consensus protocol
+        self.pbft = PBFT(node_id, len(nodes_config), self)
         
-        # Message logs
-        self.request_log = {}  # Store client requests
-        self.pre_prepare_log = {}  # Store pre-prepare messages
-        self.prepare_log = {}  # Store prepare messages
-        self.commit_log = {}  # Store commit messages
-        
-        # Execution state
-        self.last_executed_seq = 0
+        # Node state
         self.state = {}  # Simple key-value store as the state
+        self.last_executed_seq = 0
         self.execution_queue = queue.PriorityQueue()  # Queue for ordered execution
         self.executed_requests = set()  # Track executed request IDs
         
@@ -59,7 +52,6 @@ class PBFTNode:
         
         # Locks for thread safety
         self.state_lock = threading.Lock()
-        self.sequence_lock = threading.Lock()
         self.blockchain_lock = threading.Lock()
         
         # Start server
@@ -74,12 +66,12 @@ class PBFTNode:
         self.server_thread.start()
         
         # Start execution thread
-        self.execution_thread = threading.Thread(target=self.execution_loop)
+        self.execution_thread = threading.Thread(target=self.process_execution_queue)
         self.execution_thread.daemon = True
         self.execution_thread.start()
         
         self.logger.info(f"Node {self.node_id} started on {self.host}:{self.port}")
-        self.logger.info(f"Primary status: {self.is_primary}")
+        self.logger.info(f"Primary status: {self.pbft.is_primary}")
         self.logger.info(f"Genesis block hash: {genesis_block.current_hash}")
     
     def start_server(self):
@@ -140,12 +132,9 @@ class PBFTNode:
         
         if msg_type == 'request':
             self.handle_request(message)
-        elif msg_type == 'pre-prepare':
-            self.handle_pre_prepare(message)
-        elif msg_type == 'prepare':
-            self.handle_prepare(message)
-        elif msg_type == 'commit':
-            self.handle_commit(message)
+        elif msg_type in ['pre-prepare', 'prepare', 'commit']:
+            # Pass PBFT protocol messages to the PBFT module
+            self.pbft.process_message(message)
         elif msg_type == 'block-sync':
             self.handle_block_sync(message)
         else:
@@ -165,288 +154,26 @@ class PBFTNode:
         request_data = f"{client_id}:{timestamp}:{operation}"
         digest = hashlib.sha256(request_data.encode()).hexdigest()
         
-        self.request_log[request_id] = {
+        # Store request in PBFT module
+        self.pbft.store_request(request_id, {
             'client_id': client_id,
             'timestamp': timestamp,
             'operation': operation,
             'digest': digest
-        }
+        })
         
         # If this node is the primary, initiate the PBFT protocol
-        if self.is_primary:
-            with self.sequence_lock:
-                self.sequence_number += 1
-                seq_num = self.sequence_number
-            
-            # Create pre-prepare message
-            pre_prepare = {
-                'type': 'pre-prepare',
-                'view': self.view,
-                'sequence': seq_num,
-                'digest': digest,
-                'request_id': request_id,
-                'sender': self.node_id
-            }
-            
-            # Store pre-prepare message
-            key = f"{self.view}:{seq_num}"
-            self.pre_prepare_log[key] = pre_prepare
-            
-            # Broadcast pre-prepare message
-            self.broadcast(pre_prepare)
-            self.logger.info(f"Sent pre-prepare for request {request_id}, seq {seq_num}")
-            
-            # Primary also sends prepare message
-            self.handle_pre_prepare(pre_prepare)
-    
-    def handle_pre_prepare(self, message: Dict):
-        """Handle pre-prepare message"""
-        view = message.get('view')
-        sequence = message.get('sequence')
-        digest = message.get('digest')
-        request_id = message.get('request_id')
-        sender = message.get('sender')
-        
-        self.logger.info(f"Received pre-prepare from {sender} for seq {sequence}")
-        
-        # Verify the message
-        if view != self.view:
-            self.logger.warning(f"View mismatch: {view} != {self.view}")
-            return
-        
-        # Store pre-prepare message
-        key = f"{view}:{sequence}"
-        self.pre_prepare_log[key] = message
-        
-        # Send prepare message
-        prepare = {
-            'type': 'prepare',
-            'view': view,
-            'sequence': sequence,
-            'digest': digest,
-            'request_id': request_id,
-            'sender': self.node_id
-        }
-        
-        # Store and broadcast prepare message
-        if key not in self.prepare_log:
-            self.prepare_log[key] = {}
-        self.prepare_log[key][self.node_id] = prepare
-        
-        self.broadcast(prepare)
-        self.logger.info(f"Sent prepare for seq {sequence}")
-    
-    def handle_prepare(self, message: Dict):
-        """Handle prepare message"""
-        view = message.get('view')
-        sequence = message.get('sequence')
-        digest = message.get('digest')
-        sender = message.get('sender')
-        request_id = message.get('request_id')
-        
-        self.logger.info(f"Received prepare from {sender} for seq {sequence}")
-        
-        # Verify the message
-        if view != self.view:
-            self.logger.warning(f"View mismatch: {view} != {self.view}")
-            return
-        
-        # Store prepare message
-        key = f"{view}:{sequence}"
-        if key not in self.prepare_log:
-            self.prepare_log[key] = {}
-        self.prepare_log[key][sender] = message
-        
-        # Check if we have enough prepare messages (2f+1 including our own)
-        f = (len(self.nodes) - 1) // 3  # Max number of faulty nodes
-        if key in self.pre_prepare_log and len(self.prepare_log[key]) >= 2*f + 1:
-            # We have enough prepare messages, send commit
-            if key not in self.commit_log or self.node_id not in self.commit_log[key]:
-                commit = {
-                    'type': 'commit',
-                    'view': view,
-                    'sequence': sequence,
-                    'digest': digest,
-                    'request_id': request_id,
-                    'sender': self.node_id
-                }
-                
-                # Store and broadcast commit message
-                if key not in self.commit_log:
-                    self.commit_log[key] = {}
-                self.commit_log[key][self.node_id] = commit
-                
-                self.broadcast(commit)
-                self.logger.info(f"Sent commit for seq {sequence}")
-    
-    def handle_commit(self, message: Dict):
-        """Handle commit messages"""
-        sender = message.get('sender')
-        view = message.get('view')
-        sequence = message.get('sequence')
-        digest = message.get('digest')
-        request_id = message.get('request_id')
-        
-        self.logger.info(f"Received commit from {sender} for seq {sequence}")
-        
-        # Validate the message
-        if view != self.view:
-            self.logger.warning(f"Ignoring commit from different view: {view}")
-            return
-        
-        # Create a key for this message
-        key = f"{view}:{sequence}"
-        
-        # Store the commit message
-        if key not in self.commit_log:
-            self.commit_log[key] = {}
-        self.commit_log[key][sender] = message
-        
-        # Check if we have enough commit messages (2f+1)
-        f = (len(self.nodes) - 1) // 3  # Max number of faulty nodes
-        if (key in self.pre_prepare_log and 
-            len(self.commit_log[key]) >= 2*f + 1):
-            
-            # Find the request
-            pre_prepare = self.pre_prepare_log[key]
-            request_id = pre_prepare.get('request_id')
-            
-            if request_id in self.request_log and request_id not in self.executed_requests:
-                request = self.request_log[request_id]
-                
-                # CRITICAL: Execute the operation immediately after consensus
-                self.logger.info(f"CONSENSUS REACHED for operation: {request.get('operation')} (seq: {sequence})")
-                
-                # Execute the operation
-                with self.state_lock:
-                    operation = request.get('operation')
-                    parts = operation.split(' ', 2)
-                    
-                    if parts[0] == 'SET' and len(parts) == 3:
-                        key, value = parts[1], parts[2]
-                        self.state[key] = value
-                        self.logger.info(f"SET {key} = {value}")
-                        result = f"SET {key} = {value}"
-                        
-                    elif parts[0] == 'GET' and len(parts) == 2:
-                        key = parts[1]
-                        value = self.state.get(key, "NULL")
-                        self.logger.info(f"GET {key} = {value}")
-                        result = f"GET {key} = {value}"
-                        
-                    elif parts[0] == 'DELETE' and len(parts) == 2:
-                        key = parts[1]
-                        if key in self.state:
-                            del self.state[key]
-                            self.logger.info(f"DELETE {key}")
-                            result = f"DELETE {key} = SUCCESS"
-                        else:
-                            result = f"DELETE {key} = KEY_NOT_FOUND"
-                    else:
-                        self.logger.warning(f"Unknown operation format: {operation}")
-                        result = f"UNKNOWN_OPERATION: {operation}"
-                    
-                    self.executed_requests.add(request_id)
-                    self.last_executed_seq = sequence
-                    
-                    # Only the primary node creates blocks for state-changing operations
-                    if self.is_primary and parts[0] in ['SET', 'DELETE']:
-                        self.logger.info(f"PRIMARY NODE: Creating block for operation: {operation}")
-                        with self.blockchain_lock:
-                            new_block = self.blockchain.create_block(
-                                data={
-                                    'operation': operation,
-                                    'sequence': sequence,
-                                    'request_id': request_id,
-                                    'result': result,
-                                    'state_snapshot': self.state.copy()
-                                },
-                                model_type="key-value-operation",
-                                storage_reference=f"op-{sequence}",
-                                calculated_hash=hashlib.sha256(str(self.state).encode()).hexdigest(),
-                                participants=[str(self.node_id)]
-                            )
-                            self.blockchain.add_block(new_block)
-                            
-                            # Broadcast the new block to all nodes
-                            block_message = {
-                                'type': 'block-sync',
-                                'sender': self.node_id,
-                                'block': new_block.to_dict(),
-                                'sequence': sequence
-                            }
-                            self.broadcast(block_message)
-                            self.logger.info(f"PRIMARY NODE: Created and broadcast block #{new_block.index} for sequence {sequence}")
-                            self.logger.info(f"PRIMARY NODE: Current blockchain length: {len(self.blockchain.blocks)}")
-    
-    def execution_loop(self):
-        """Process operations in sequence order"""
-        while self.running:
-            try:
-                # Get the next operation with the lowest sequence number
-                sequence, request_id, request = self.execution_queue.get(timeout=0.1)
-                
-                # Check if this request has already been executed
-                if request_id in self.executed_requests:
-                    self.logger.info(f"Request {request_id} already executed, skipping")
-                    continue
-                
-                # Check if this is the next sequence to execute
-                if sequence > self.last_executed_seq + 1:
-                    # Put it back in the queue and try again later
-                    self.logger.info(f"Sequence {sequence} not ready yet, current last executed: {self.last_executed_seq}")
-                    self.execution_queue.put((sequence, request_id, request))
-                    time.sleep(0.05)  # Small delay to prevent CPU spinning
-                    continue
-                
-                # Execute the operation
-                self.logger.info(f"Executing operation for sequence {sequence}: {request.get('operation')}")
-                with self.state_lock:
-                    result = self.execute_operation(sequence, request)
-                    self.executed_requests.add(request_id)
-                    self.last_executed_seq = sequence
-                
-                # Only the primary node creates blocks
-                if self.is_primary:
-                    self.logger.info(f"Primary node creating block for operation: {request.get('operation')}")
-                    with self.blockchain_lock:
-                        new_block = self.blockchain.create_block(
-                            data={
-                                'operation': request.get('operation'),
-                                'sequence': sequence,
-                                'request_id': request_id,
-                                'result': result,
-                                'state_snapshot': self.state.copy()
-                            },
-                            model_type="key-value-operation",
-                            storage_reference=f"op-{sequence}",
-                            calculated_hash=hashlib.sha256(str(self.state).encode()).hexdigest(),
-                            participants=[str(self.node_id)]
-                        )
-                        self.blockchain.add_block(new_block)
-                        
-                        # Broadcast the new block to all nodes
-                        block_message = {
-                            'type': 'block-sync',
-                            'sender': self.node_id,
-                            'block': new_block.to_dict(),
-                            'sequence': sequence
-                        }
-                        self.broadcast(block_message)
-                        self.logger.info(f"Created and broadcast block #{new_block.index} for sequence {sequence}")
-            
-            except queue.Empty:
-                # No operations to execute, just wait
-                time.sleep(0.05)
-            except Exception as e:
-                self.logger.error(f"Error in execution loop: {e}")
+        if self.pbft.is_primary:
+            self.pbft.start_consensus(request_id)
     
     def execute_operation(self, sequence: int, request: Dict):
         """Execute the operation and update the state"""
         operation = request.get('operation')
+        request_id = request.get('request_id', '')
         self.logger.info(f"Executing operation for seq {sequence}: {operation}")
         
         result = None
+        state_changed = False
         
         # Parse and execute the operation (simple key-value operations)
         try:
@@ -458,34 +185,8 @@ class PBFTNode:
                     self.state[key] = value
                     self.logger.info(f"SET {key} = {value}")
                     result = f"SET {key} = {value}"
-                
-                # Only the primary node should create blocks
-                if self.is_primary:
-                    with self.blockchain_lock:
-                        new_block = self.blockchain.create_block(
-                            data={
-                                'operation': operation,
-                                'sequence': sequence,
-                                'request_id': request.get('request_id', ''),
-                                'result': result,
-                                'state_snapshot': self.state.copy()
-                            },
-                            model_type="key-value-operation",
-                            storage_reference=f"op-{sequence}",
-                            calculated_hash=hashlib.sha256(str(self.state).encode()).hexdigest(),
-                            participants=[str(self.node_id)]
-                        )
-                        self.blockchain.add_block(new_block)
-                        self.logger.info(f"Created and broadcast block #{new_block.index} for sequence {sequence}")
-                        
-                        # Broadcast the new block to all nodes (including self)
-                        block_sync = {
-                            'type': 'block-sync',
-                            'sender': self.node_id,
-                            'block': new_block.to_dict(),
-                            'sequence': sequence
-                        }
-                        self.broadcast(block_sync)
+                    state_changed = True
+                    self.logger.info(f"State changed: {state_changed}")
             
             elif parts[0] == 'GET' and len(parts) == 2:
                 key = parts[1]
@@ -502,34 +203,8 @@ class PBFTNode:
                         del self.state[key]
                         self.logger.info(f"DELETE {key}")
                         result = f"DELETE {key} = SUCCESS"
-                        
-                        # Only the primary node should create blocks
-                        if self.is_primary:
-                            with self.blockchain_lock:
-                                new_block = self.blockchain.create_block(
-                                    data={
-                                        'operation': operation,
-                                        'sequence': sequence,
-                                        'request_id': request.get('request_id', ''),
-                                        'result': result,
-                                        'state_snapshot': self.state.copy()
-                                    },
-                                    model_type="key-value-operation",
-                                    storage_reference=f"op-{sequence}",
-                                    calculated_hash=hashlib.sha256(str(self.state).encode()).hexdigest(),
-                                    participants=[str(self.node_id)]
-                                )
-                                self.blockchain.add_block(new_block)
-                                self.logger.info(f"Created and broadcast block #{new_block.index} for sequence {sequence}")
-                                
-                                # Broadcast the new block to all nodes (including self)
-                                block_sync = {
-                                    'type': 'block-sync',
-                                    'sender': self.node_id,
-                                    'block': new_block.to_dict(),
-                                    'sequence': sequence
-                                }
-                                self.broadcast(block_sync)
+                        state_changed = True
+                        self.logger.info(f"State changed: {state_changed}")
                     else:
                         result = f"DELETE {key} = KEY_NOT_FOUND"
             else:
@@ -539,35 +214,74 @@ class PBFTNode:
             self.logger.error(f"Error executing operation: {e}")
             result = f"ERROR: {str(e)}"
         
+        # Create a new block for state-changing operations
+        if state_changed:
+            self.logger.info(f"Creating block for operation: {operation}, sequence: {sequence}")
+            with self.blockchain_lock:
+                new_block = self.blockchain.create_block(
+                    data={
+                        'operation': operation,
+                        'sequence': sequence,
+                        'request_id': request_id,
+                        'result': result,
+                        'state_snapshot': self.state.copy()
+                    },
+                    model_type="key-value-operation",
+                    storage_reference=f"op-{sequence}",
+                    calculated_hash=hashlib.sha256(str(self.state).encode()).hexdigest(),
+                    participants=[str(self.node_id)]
+                )
+                self.blockchain.add_block(new_block)
+                self.logger.info(f"Created block #{new_block.index} for sequence {sequence}, hash: {new_block.current_hash[:10]}...")
+                
+                # If this node is the primary, broadcast the new block to all nodes
+                if self.pbft.is_primary:
+                    self.logger.info(f"Broadcasting block #{new_block.index} to all nodes")
+                    block_sync = {
+                        'type': 'block-sync',
+                        'sender': self.node_id,
+                        'block': new_block.to_dict(),
+                        'sequence': sequence
+                    }
+                    self.broadcast(block_sync)
+        
         self.logger.info(f"Current state: {self.state}")
         return result
     
-    def create_and_propose_block(self):
-        """Create a new block and propose it to the network"""
-        # Create a new block with pending operations
-        participants = [str(self.node_id)]  # Start with this node as a participant
-        
-        new_block = self.blockchain.create_block_from_pending(
-            model_type="key-value-store",
-            storage_reference=f"state-{int(time.time())}",
-            calculated_hash=hashlib.sha256(str(self.state).encode()).hexdigest(),
-            participants=participants
-        )
-        
-        if new_block:
-            # Reset counter
-            self.operations_since_last_block = 0
-            
-            # Propose the block to other nodes
-            block_proposal = {
-                'type': 'block-proposal',
-                'sender': self.node_id,
-                'block': new_block.to_dict(),
-                'timestamp': time.time()
-            }
-            
-            self.broadcast(block_proposal)
-            self.logger.info(f"Proposed new block #{new_block.index} with {len(new_block.data)} operations")
+    def process_execution_queue(self):
+        """Process the execution queue in order"""
+        while self.running:
+            try:
+                # Check if there's anything to execute
+                if self.execution_queue.empty():
+                    time.sleep(0.05)
+                    continue
+                
+                # Peek at the next item
+                sequence, request_id, request = self.execution_queue.queue[0]
+                
+                # If this is the next sequence to execute, process it
+                if sequence == self.last_executed_seq + 1:
+                    # Remove from queue
+                    self.execution_queue.get()
+                    
+                    # Execute the operation
+                    self.logger.info(f"Executing operation from queue: {request.get('operation')} (seq: {sequence})")
+                    with self.state_lock:
+                        result = self.execute_operation(sequence, request)
+                        self.executed_requests.add(request_id)
+                        self.last_executed_seq = sequence
+                elif sequence < self.last_executed_seq + 1:
+                    # This is an old sequence, discard it
+                    self.execution_queue.get()
+                    self.logger.info(f"Discarding already executed sequence: {sequence}")
+                else:
+                    # We're not ready to execute this yet
+                    self.logger.info(f"Sequence {sequence} not ready yet, current last executed: {self.last_executed_seq}")
+                    time.sleep(0.05)
+            except Exception as e:
+                self.logger.error(f"Error in execution queue processing: {e}")
+                time.sleep(0.1)
     
     def handle_block_sync(self, message: Dict):
         """Handle block synchronization from the primary node"""
@@ -576,13 +290,23 @@ class PBFTNode:
         sequence = message.get('sequence')
         
         # Only accept blocks from the primary node
-        if sender != self.view % len(self.nodes):
+        primary_id = self.pbft.view % len(self.nodes)
+        if sender != primary_id:
             self.logger.warning(f"Ignoring block from non-primary node {sender}")
             return
         
         self.logger.info(f"Received block sync from primary node {sender} for sequence {sequence}")
         
-        # Recreate the block exactly as sent by the primary
+        # Check if we already have a block with this index
+        block_index = block_data.get('index')
+        with self.blockchain_lock:
+            if block_index < len(self.blockchain.blocks):
+                existing_block = self.blockchain.blocks[block_index]
+                if existing_block.current_hash == block_data.get('current_hash'):
+                    self.logger.info(f"Block #{block_index} already exists with same hash, skipping")
+                    return
+        
+        # Create a new block with the exact same properties
         new_block = Block(
             index=block_data.get('index'),
             data=block_data.get('data'),
@@ -592,20 +316,40 @@ class PBFTNode:
             participants=block_data.get('participants'),
             previous_hash=block_data.get('previous_hash')
         )
-        # Important: preserve exact timestamp and nonce to ensure identical hash
+        
+        # Set the exact same timestamp and nonce to ensure identical hash
         new_block.timestamp = block_data.get('timestamp')
         new_block.nonce = block_data.get('nonce')
         
         # Add or replace the block in our blockchain
         with self.blockchain_lock:
-            if new_block.index < len(self.blockchain.blocks):
-                # Replace existing block
-                self.blockchain.blocks[new_block.index] = new_block
-                self.logger.info(f"Replaced block #{new_block.index} with block from primary")
+            if block_index < len(self.blockchain.blocks):
+                self.blockchain.blocks[block_index] = new_block
+                self.logger.info(f"Replaced block #{block_index} with block from primary, hash: {new_block.current_hash[:10]}...")
             else:
-                # Add new block
-                self.blockchain.add_block(new_block)
-                self.logger.info(f"Added block #{new_block.index} from primary node {sender}")
+                # Make sure we're adding blocks in order
+                if block_index == len(self.blockchain.blocks):
+                    self.blockchain.blocks.append(new_block)
+                    self.logger.info(f"Added block #{block_index} from primary, hash: {new_block.current_hash[:10]}...")
+                else:
+                    self.logger.warning(f"Received out-of-order block #{block_index}, expected {len(self.blockchain.blocks)}")
+            
+            # Apply the operation from the block
+            operation_data = new_block.data
+            if operation_data:
+                with self.state_lock:
+                    op_type = operation_data.get('type')
+                    key = operation_data.get('key')
+                    
+                    if op_type == 'SET':
+                        value = operation_data.get('value')
+                        self.state[key] = value
+                        self.logger.info(f"Applied SET {key} = {value} from block")
+                    
+                    elif op_type == 'DELETE':
+                        if key in self.state:
+                            del self.state[key]
+                            self.logger.info(f"Applied DELETE {key} from block")
     
     def get_state(self):
         """Return a copy of the current state"""
@@ -621,4 +365,150 @@ class PBFTNode:
         """Stop the node"""
         self.running = False
         self.server_socket.close()
-        self.logger.info(f"Node {self.node_id} stopped") 
+        self.logger.info(f"Node {self.node_id} stopped")
+    
+    # Callback methods for PBFT
+    def on_consensus_reached(self, sequence, request_id, request):
+        """Called by PBFT when consensus is reached for a request"""
+        self.logger.info(f"CONSENSUS REACHED for operation: {request.get('operation')} (seq: {sequence})")
+        
+        # Check if this request has already been executed
+        if request_id in self.executed_requests:
+            self.logger.info(f"Request {request_id} already executed, skipping")
+            return
+        
+        # Check if this sequence has already been executed
+        if sequence <= self.last_executed_seq:
+            self.logger.info(f"Sequence {sequence} already executed, skipping")
+            return
+        
+        # Check if we already have a block for this sequence
+        with self.blockchain_lock:
+            for block in self.blockchain.blocks:
+                if block.data.get('sequence') == sequence:
+                    self.logger.info(f"Block for sequence {sequence} already exists, skipping execution")
+                    self.executed_requests.add(request_id)
+                    self.last_executed_seq = sequence
+                    return
+        
+        # Execute the operation directly
+        operation = request.get('operation')
+        self.logger.info(f"Executing operation: {operation} (seq: {sequence})")
+        
+        result = None
+        state_changed = False
+        operation_data = {}  # Simplified operation data
+        
+        # Parse and execute the operation (simple key-value operations)
+        try:
+            parts = operation.split(' ', 2)  # Split only on the first two spaces
+            
+            if parts[0] == 'SET' and len(parts) == 3:
+                key, value = parts[1], parts[2]
+                with self.state_lock:
+                    old_value = self.state.get(key, None)
+                    if old_value != value:
+                        # Simplified operation data
+                        operation_data = {
+                            'type': 'SET',
+                            'key': key,
+                            'value': value,
+                            'sequence': sequence  # Keep sequence for reference
+                        }
+                        self.state[key] = value
+                        self.logger.info(f"SET {key} = {value}")
+                        result = f"SET {key} = {value}"
+                        state_changed = True
+                    else:
+                        self.logger.info(f"SET {key} = {value} (no change)")
+                        result = f"SET {key} = {value} (no change)"
+            
+            elif parts[0] == 'GET' and len(parts) == 2:
+                key = parts[1]
+                with self.state_lock:
+                    value = self.state.get(key, "NULL")
+                    self.logger.info(f"GET {key} = {value}")
+                    result = f"GET {key} = {value}"
+                    # Simplified operation data
+                    operation_data = {
+                        'type': 'GET',
+                        'key': key,
+                        'value': value,
+                        'sequence': sequence  # Keep sequence for reference
+                    }
+                # GET operations don't modify state, so no new block needed
+            
+            elif parts[0] == 'DELETE' and len(parts) == 2:
+                key = parts[1]
+                with self.state_lock:
+                    if key in self.state:
+                        # Simplified operation data
+                        operation_data = {
+                            'type': 'DELETE',
+                            'key': key,
+                            'sequence': sequence  # Keep sequence for reference
+                        }
+                        del self.state[key]
+                        self.logger.info(f"DELETE {key}")
+                        result = f"DELETE {key} = SUCCESS"
+                        state_changed = True
+                    else:
+                        result = f"DELETE {key} = KEY_NOT_FOUND"
+            else:
+                self.logger.warning(f"Unknown operation format: {operation}")
+                result = f"UNKNOWN_OPERATION: {operation}"
+        except Exception as e:
+            self.logger.error(f"Error executing operation: {e}")
+            result = f"ERROR: {str(e)}"
+        
+        # Only the primary node creates blocks, others wait for sync
+        if state_changed and self.pbft.is_primary:
+            self.logger.info(f"Primary node creating block for sequence {sequence}")
+            with self.blockchain_lock:
+                # Check again if we already have a block for this sequence
+                for block in self.blockchain.blocks:
+                    if block.data.get('sequence') == sequence:
+                        self.logger.info(f"Block for sequence {sequence} already exists, skipping block creation")
+                        break
+                else:
+                    # Create a deterministic block with fixed timestamp
+                    fixed_timestamp = 1000000000 + sequence  # Deterministic timestamp
+                    
+                    # Get the previous hash from the last block in the chain
+                    previous_hash = ""
+                    if len(self.blockchain.blocks) > 0:
+                        previous_hash = self.blockchain.blocks[-1].current_hash
+                    
+                    # Store only the essential operation data in the block
+                    new_block = Block(
+                        index=len(self.blockchain.blocks),
+                        data=operation_data,  # Just the simplified operation data
+                        model_type="key-value-operation",
+                        storage_reference=f"op-{sequence}",
+                        calculated_hash=hashlib.sha256(str(operation).encode()).hexdigest(),
+                        participants=[str(self.node_id)],
+                        previous_hash=previous_hash  # Set the previous hash correctly
+                    )
+                    # Set deterministic timestamp
+                    new_block.timestamp = fixed_timestamp
+                    # We don't need to set nonce as it's not used for consensus
+                    
+                    self.blockchain.add_block(new_block)
+                    self.logger.info(f"Created block #{new_block.index} for sequence {sequence}, hash: {new_block.current_hash[:10]}...")
+                    
+                    # Broadcast the new block to all nodes
+                    self.logger.info(f"Broadcasting block #{new_block.index} to all nodes")
+                    block_sync = {
+                        'type': 'block-sync',
+                        'sender': self.node_id,
+                        'block': new_block.to_dict(),
+                        'sequence': sequence
+                    }
+                    self.broadcast(block_sync)
+        
+        # Mark as executed and update sequence
+        self.executed_requests.add(request_id)
+        self.last_executed_seq = sequence
+        
+        self.logger.info(f"Current state: {self.state}")
+        return result 
