@@ -27,6 +27,18 @@ def send_concurrent_requests(clients, operations):
     
     logger.info("All concurrent requests sent")
 
+def simulate_primary_failure(nodes):
+    """Simulate primary node failure"""
+    # Find the current primary
+    for node in nodes:
+        if node.pbft.is_primary:
+            primary_id = node.node_id
+            logger.info(f"Simulating failure of primary node {primary_id}")
+            # Stop the node
+            node.stop()
+            return primary_id
+    return None
+
 def main():
     # Define node configurations
     num_nodes = 4  # 4 nodes can tolerate 1 Byzantine fault
@@ -83,8 +95,9 @@ def main():
             print("6. Compare blockchains across nodes")
             print("7. Save blockchain to file")
             print("8. Exit")
+            print("9. Simulate primary node failure")
             
-            choice = input("Enter your choice (1-8): ")
+            choice = input("Enter your choice (1-9): ")
             
             if choice == '1':
                 operation_type = input("Enter operation type (SET/GET/DELETE): ").upper()
@@ -257,8 +270,28 @@ def main():
             elif choice == '8':
                 break
             
+            elif choice == '9':
+                failed_primary = simulate_primary_failure(nodes)
+                if failed_primary is not None:
+                    print(f"Primary node {failed_primary} has been stopped. Waiting for view change...")
+                    time.sleep(10)  # Wait for view change to occur
+                    
+                    # Check new primary
+                    new_primary = None
+                    for i, node in enumerate(nodes):
+                        if i != failed_primary and node.pbft.is_primary:
+                            new_primary = i
+                            break
+                    
+                    if new_primary is not None:
+                        print(f"View change successful! New primary is node {new_primary}")
+                    else:
+                        print("View change may not have completed yet")
+                else:
+                    print("Could not identify primary node")
+            
             else:
-                print("Invalid choice. Please enter a number between 1 and 8.")
+                print("Invalid choice. Please enter a number between 1 and 9.")
     
     except KeyboardInterrupt:
         pass

@@ -1,6 +1,7 @@
 import logging
 import threading
 from typing import Dict
+import time
 
 class PBFT:
     def __init__(self, node_id: int, total_nodes: int, node):
@@ -19,9 +20,28 @@ class PBFT:
         self.pre_prepare_log = {}  # Store pre-prepare messages
         self.prepare_log = {}  # Store prepare messages
         self.commit_log = {}  # Store commit messages
+        self.executed_log = {}  # Store executed requests
+        
+        # View change related
+        self.view_change_log = {}  # Store view-change messages
+        self.new_view_log = {}  # Store new-view messages
+        self.view_change_timeout = 10.0  # Increased from 5.0 to 10.0 seconds
+        self.view_change_timer = None
+        self.changing_view = False
+        self.last_activity_time = time.time()
         
         # Calculate the maximum number of faulty nodes
         self.f = (self.total_nodes - 1) // 3
+        
+        # Heartbeat related
+        self.heartbeat_interval = 2.0  # Send heartbeat every 2 seconds
+        self.heartbeat_timer = None
+        
+        # Start the view change timer
+        self.reset_view_change_timer()
+        
+        # Start the heartbeat timer if this is the primary
+        self.start_heartbeat_timer()
         
         self.logger.info(f"PBFT initialized with {total_nodes} nodes, f={self.f}")
     
@@ -77,39 +97,52 @@ class PBFT:
         """Process PBFT protocol messages"""
         msg_type = message.get('type')
         
+        # Record activity for any message type
+        self.record_activity()
+        
         if msg_type == 'pre-prepare':
             self.process_pre_prepare(message)
         elif msg_type == 'prepare':
             self.process_prepare(message)
         elif msg_type == 'commit':
             self.process_commit(message)
+        elif msg_type == 'view-change':
+            self.process_view_change(message)
+        elif msg_type == 'new-view':
+            self.process_new_view(message)
+        elif msg_type == 'heartbeat':
+            # Just record activity, no further processing needed
+            pass
     
     def process_pre_prepare(self, message: Dict):
-        """Process pre-prepare message"""
+        """Process a pre-prepare message"""
         view = message.get('view')
-        sequence = message.get('sequence')
-        digest = message.get('digest')
+        seq = message.get('sequence')
+        global_seq = message.get('global_sequence', seq)  # Use global sequence if available
         request_id = message.get('request_id')
+        digest = message.get('digest')
         sender = message.get('sender')
         
-        self.logger.info(f"Processing pre-prepare from {sender} for seq {sequence}")
+        self.logger.info(f"Processing pre-prepare from {sender} for seq {seq}")
         
         # Verify the message
         if view != self.view:
-            self.logger.warning(f"View mismatch: {view} != {self.view}")
+            self.logger.warning(f"Ignoring pre-prepare for different view: {view}")
             return
         
-        # Store pre-prepare message
-        key = f"{view}:{sequence}"
+        # Store the pre-prepare message
+        key = f"{view}:{seq}"
+        if key not in self.pre_prepare_log:
+            self.pre_prepare_log[key] = {}
         self.pre_prepare_log[key] = message
         
-        # Send prepare message
+        # Create and send prepare message
         prepare = {
             'type': 'prepare',
             'view': view,
-            'sequence': sequence,
+            'sequence': seq,
+            'global_sequence': global_seq,
             'digest': digest,
-            'request_id': request_id,
             'sender': self.node_id
         }
         
@@ -119,7 +152,10 @@ class PBFT:
         self.prepare_log[key][self.node_id] = prepare
         
         self.node.broadcast(prepare)
-        self.logger.info(f"Sent prepare for seq {sequence}")
+        self.logger.info(f"Sent prepare for seq {seq}")
+        
+        # Process the prepare message locally
+        self.process_prepare(prepare)
     
     def process_prepare(self, message: Dict):
         """Process prepare message"""
@@ -164,41 +200,49 @@ class PBFT:
                 self.logger.info(f"Sent commit for seq {sequence}")
     
     def process_commit(self, message: Dict):
-        """Process commit message"""
-        sender = message.get('sender')
+        """Process a commit message"""
         view = message.get('view')
-        sequence = message.get('sequence')
+        seq = message.get('sequence')
         digest = message.get('digest')
-        request_id = message.get('request_id')
+        sender = message.get('sender')
         
-        self.logger.info(f"Processing commit from {sender} for seq {sequence}")
+        self.logger.info(f"Processing commit from {sender} for seq {seq}")
         
-        # Validate the message
+        # Verify the message
         if view != self.view:
-            self.logger.warning(f"Ignoring commit from different view: {view}")
+            self.logger.warning(f"Ignoring commit for different view: {view}")
             return
         
-        # Create a key for this message
-        key = f"{view}:{sequence}"
-        
         # Store the commit message
+        key = f"{view}:{seq}"
         if key not in self.commit_log:
             self.commit_log[key] = {}
         self.commit_log[key][sender] = message
         
-        # Check if we have enough commit messages (2f+1)
-        if (key in self.pre_prepare_log and 
-            len(self.commit_log[key]) >= 2*self.f + 1):
+        # Check if we have enough commits (2f+1 including our own)
+        if len(self.commit_log[key]) >= 2 * self.f + 1:
+            # Check if we've already executed this request
+            if key in self.executed_log:
+                return
             
-            # Find the request
-            pre_prepare = self.pre_prepare_log[key]
+            # Mark as executed
+            self.executed_log[key] = True
+            
+            # Get the request from the pre-prepare message
+            pre_prepare = self.pre_prepare_log.get(key)
+            if not pre_prepare:
+                self.logger.warning(f"No pre-prepare found for {key}")
+                return
+            
             request_id = pre_prepare.get('request_id')
+            request = self.request_log.get(request_id)
+            if not request:
+                self.logger.warning(f"No request found for {request_id}")
+                return
             
-            if request_id in self.request_log and request_id not in self.node.executed_requests:
-                request = self.request_log[request_id]
-                
-                # Notify the node that consensus has been reached
-                self.node.on_consensus_reached(sequence, request_id, request)
+            # Notify the node that consensus has been reached
+            self.logger.info(f"Consensus reached for request {request_id}, seq {seq}")
+            self.node.on_consensus_reached(seq, request)
 
     def handle_request(self, request: Dict):
         """Handle a client request"""
@@ -239,3 +283,212 @@ class PBFT:
             
             # Primary also processes its own pre-prepare message
             self.process_pre_prepare(pre_prepare) 
+
+    def reset_view_change_timer(self):
+        """Reset the view change timer"""
+        if self.view_change_timer:
+            self.view_change_timer.cancel()
+        
+        # Only non-primary nodes need to monitor for primary failure
+        if not self.is_primary:
+            self.view_change_timer = threading.Timer(self.view_change_timeout, self.initiate_view_change)
+            self.view_change_timer.daemon = True
+            self.view_change_timer.start()
+        
+        self.last_activity_time = time.time()
+
+    def record_activity(self):
+        """Record activity to prevent unnecessary view changes"""
+        self.last_activity_time = time.time()
+        # If we're not in the middle of a view change, reset the timer
+        if not self.changing_view:
+            self.reset_view_change_timer()
+
+    def initiate_view_change(self):
+        """Initiate a view change when the primary is suspected to be faulty"""
+        # Check if there has been recent activity
+        if time.time() - self.last_activity_time < self.view_change_timeout:
+            self.reset_view_change_timer()
+            return
+        
+        # Don't initiate if we're already changing view
+        if self.changing_view:
+            return
+        
+        self.changing_view = True
+        new_view = self.view + 1
+        self.logger.warning(f"Initiating view change to view {new_view}")
+        
+        # Create view-change message
+        view_change_msg = {
+            'type': 'view-change',
+            'new_view': new_view,
+            'last_seq': self.sequence_number,
+            'sender': self.node_id,
+            # Include information about prepared requests
+            'prepared': self.get_prepared_requests()
+        }
+        
+        # Store and broadcast the view-change message
+        if new_view not in self.view_change_log:
+            self.view_change_log[new_view] = {}
+        self.view_change_log[new_view][self.node_id] = view_change_msg
+        
+        self.node.broadcast(view_change_msg)
+        self.logger.info(f"Sent view-change message for view {new_view}")
+
+    def get_prepared_requests(self):
+        """Get information about prepared requests for view change"""
+        prepared = []
+        for key, prepares in self.prepare_log.items():
+            view, seq = map(int, key.split(':'))
+            # Check if this request has enough prepares (2f+1)
+            if len(prepares) >= 2*self.f + 1:
+                # Get the digest from any prepare message
+                any_prepare = next(iter(prepares.values()))
+                digest = any_prepare.get('digest')
+                request_id = any_prepare.get('request_id')
+                prepared.append({
+                    'view': view,
+                    'sequence': seq,
+                    'digest': digest,
+                    'request_id': request_id
+                })
+        return prepared
+
+    def process_view_change(self, message: Dict):
+        """Process view-change message"""
+        sender = message.get('sender')
+        new_view = message.get('new_view')
+        
+        self.logger.info(f"Processing view-change from {sender} for view {new_view}")
+        
+        # Store the view-change message
+        if new_view not in self.view_change_log:
+            self.view_change_log[new_view] = {}
+        self.view_change_log[new_view][sender] = message
+        
+        # Check if we have enough view-change messages (2f+1)
+        if len(self.view_change_log.get(new_view, {})) >= 2*self.f + 1:
+            # If this node is the primary for the new view, send new-view message
+            if self.node_id == (new_view % self.total_nodes):
+                self.send_new_view(new_view)
+
+    def send_new_view(self, new_view: int):
+        """Send new-view message (only called by the new primary)"""
+        # Collect all view-change messages for this view
+        view_changes = self.view_change_log.get(new_view, {})
+        
+        # Create new-view message
+        new_view_msg = {
+            'type': 'new-view',
+            'view': new_view,
+            'view_changes': list(view_changes.values()),  # Include all view-change messages
+            'sender': self.node_id
+        }
+        
+        # Store and broadcast the new-view message
+        self.new_view_log[new_view] = new_view_msg
+        self.node.broadcast(new_view_msg)
+        self.logger.info(f"Sent new-view message for view {new_view}")
+        
+        # Update to the new view
+        self.install_new_view(new_view)
+
+    def process_new_view(self, message: Dict):
+        """Process new-view message"""
+        sender = message.get('sender')
+        new_view = message.get('view')
+        view_changes = message.get('view_changes', [])
+        
+        self.logger.info(f"Processing new-view from {sender} for view {new_view}")
+        
+        # Verify the message
+        if sender != (new_view % self.total_nodes):
+            self.logger.warning(f"New-view message from incorrect sender: {sender}")
+            return
+        
+        # Verify that there are enough view-change messages
+        if len(view_changes) < 2*self.f + 1:
+            self.logger.warning(f"Not enough view-change messages: {len(view_changes)}")
+            return
+        
+        # Store the new-view message
+        self.new_view_log[new_view] = message
+        
+        # Update to the new view
+        self.install_new_view(new_view)
+
+    def install_new_view(self, new_view: int):
+        """Install the new view"""
+        self.logger.info(f"Installing new view: {new_view}")
+        old_view = self.view
+        self.view = new_view
+        
+        # Reset sequence number when view changes
+        with self.sequence_lock:
+            self.sequence_number = 0
+            # Don't reset global_sequence
+        
+        self.changing_view = False
+        
+        # Reset view change timer
+        self.reset_view_change_timer()
+        
+        # Start heartbeat timer if this node is the new primary
+        self.start_heartbeat_timer()
+        
+        # Log primary status
+        self.logger.info(f"Primary status after view change: {self.is_primary}")
+        
+        # Notify the node about the view change
+        self.node.on_view_change(old_view, new_view)
+        
+        # If this node is the new primary, it should re-issue pre-prepares for
+        # any prepared requests from the previous view
+        if self.is_primary:
+            self.reissue_prepares()
+
+    def reissue_prepares(self):
+        """Re-issue pre-prepares for prepared requests from previous view"""
+        # This would re-issue pre-prepares for any requests that were prepared
+        # but not committed in the previous view
+        # Implementation depends on how you track prepared but uncommitted requests
+        pass
+
+    def start_heartbeat_timer(self):
+        """Start or restart the heartbeat timer for the primary"""
+        if self.heartbeat_timer:
+            self.heartbeat_timer.cancel()
+        
+        # Only primary nodes need to send heartbeats
+        if self.is_primary:
+            self.heartbeat_timer = threading.Timer(self.heartbeat_interval, self.send_heartbeat)
+            self.heartbeat_timer.daemon = True
+            self.heartbeat_timer.start()
+
+    def send_heartbeat(self):
+        """Send a heartbeat message to all nodes"""
+        if not self.is_primary:
+            return
+        
+        heartbeat_msg = {
+            'type': 'heartbeat',
+            'view': self.view,
+            'sender': self.node_id,
+            'timestamp': time.time()
+        }
+        
+        self.node.broadcast(heartbeat_msg)
+        self.logger.debug(f"Primary sent heartbeat for view {self.view}")
+        
+        # Schedule the next heartbeat
+        self.start_heartbeat_timer()
+
+    def cleanup(self):
+        """Clean up timers when node is shutting down"""
+        if self.view_change_timer:
+            self.view_change_timer.cancel()
+        
+        if self.heartbeat_timer:
+            self.heartbeat_timer.cancel() 

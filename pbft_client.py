@@ -27,17 +27,54 @@ class PBFTClient:
             'request_id': f"{self.client_id}:{timestamp}"
         }
         
-        # Send to all nodes (in a real system, you might just send to the primary)
-        success_count = 0
+        # Try to find the primary node first
+        primary_found = False
         for node in self.nodes:
             try:
                 self.logger.info(f"Sending request to node {node['id']}: {operation}")
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1.0)  # Short timeout for primary check
                 s.connect((node['host'], node['port']))
-                s.sendall(json.dumps(request).encode('utf-8'))
+                
+                # Send a ping message to check if this is the primary
+                ping = {
+                    'type': 'ping',
+                    'client_id': self.client_id,
+                    'timestamp': timestamp
+                }
+                s.sendall(json.dumps(ping).encode('utf-8'))
+                
+                # Wait for response
+                response = s.recv(1024)
+                if response:
+                    resp_data = json.loads(response.decode('utf-8'))
+                    if resp_data.get('is_primary', False):
+                        # This is the primary, send the actual request
+                        s.sendall(json.dumps(request).encode('utf-8'))
+                        s.close()
+                        primary_found = True
+                        self.logger.info(f"Request sent to primary node {node['id']}")
+                        break
                 s.close()
-                success_count += 1
-            except Exception as e:
-                self.logger.error(f"Error sending to node {node['id']}: {e}")
+            except Exception:
+                # Skip failed nodes
+                continue
         
-        return success_count > 0 
+        # If primary not found or request to primary failed, send to all nodes
+        if not primary_found:
+            self.logger.warning("Primary node not found, sending to all available nodes")
+            success_count = 0
+            for node in self.nodes:
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.connect((node['host'], node['port']))
+                    s.sendall(json.dumps(request).encode('utf-8'))
+                    s.close()
+                    success_count += 1
+                except Exception:
+                    # Skip failed nodes
+                    continue
+            
+            return success_count > 0
+        
+        return True 
