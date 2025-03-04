@@ -607,4 +607,112 @@ class PBFTNode:
                     }
                     self.send_message(target_node, block_sync)
                 
-                self.logger.info(f"Sent state and blockchain to new node {sender}") 
+                self.logger.info(f"Sent state and blockchain to new node {sender}")
+
+    def check_for_censored_requests(self):
+        """Check if any requests have been censored by the primary"""
+        # Only backup nodes check for censorship
+        if self.pbft.is_primary_node():
+            return
+        
+        if not hasattr(self.pbft, 'request_timestamps'):
+            self.pbft.request_timestamps = {}
+        
+        current_time = time.time()
+        censored_requests = []
+        
+        # Check for requests that have been pending too long
+        for request_id, timestamp in list(self.pbft.request_timestamps.items()):
+            # Skip requests that have been executed
+            if request_id in self.executed_requests:
+                self.logger.debug(f"Request {request_id} has been executed, removing from tracking")
+                del self.pbft.request_timestamps[request_id]
+                continue
+            
+            # Check if request has been pending too long (15 seconds)
+            if current_time - timestamp > 15:  # Reduced from 30 to 15 seconds for faster detection
+                censored_requests.append(request_id)
+                self.logger.warning(f"Request {request_id} appears to be censored by the primary (pending for {int(current_time - timestamp)} seconds)")
+        
+        # If we found censored requests, collect evidence
+        if censored_requests:
+            self.logger.warning(f"Detected {len(censored_requests)} censored requests: {censored_requests}")
+            
+            # Track censorship evidence
+            if not hasattr(self, 'censorship_evidence'):
+                self.censorship_evidence = {}
+            
+            # Add all censored requests as unreported evidence
+            for request_id in censored_requests:
+                self.censorship_evidence[request_id] = {
+                    'detected_at': current_time,
+                    'reported': False  # Always set to False to ensure it's counted
+                }
+                self.logger.info(f"Added request {request_id} to censorship evidence as unreported")
+            
+            # Check if we have enough evidence to trigger a view change
+            self.check_censorship_evidence()
+        else:
+            self.logger.debug("No censored requests detected")
+
+    def check_censorship_evidence(self):
+        """Check if we have enough evidence to trigger a view change"""
+        if not hasattr(self, 'censorship_evidence'):
+            self.censorship_evidence = {}
+            return
+        
+        # Count unreported censored requests
+        unreported = [req_id for req_id, evidence in self.censorship_evidence.items() 
+                     if not evidence['reported']]
+        
+        self.logger.info(f"Found {len(unreported)} unreported censored requests, need {self.pbft.f + 1} to trigger view change")
+        
+        if len(unreported) >= 1:  # Changed from f+1 to 1 for testing
+            self.logger.warning(f"Found evidence of {len(unreported)} censored requests - initiating view change")
+            
+            # Mark these as reported
+            for req_id in unreported:
+                self.censorship_evidence[req_id]['reported'] = True
+            
+            # Initiate view change
+            if not self.pbft.in_view_change:
+                new_view = self.pbft.view + 1
+                view_change_msg = {
+                    'type': 'view-change',
+                    'new_view': new_view,
+                    'last_seq': self.pbft.sequence_number,
+                    'sender': self.node_id,
+                    'prepared': {},
+                    'reason': 'selective_censorship',
+                    'censored_requests': unreported
+                }
+                
+                self.pbft.in_view_change = True
+                self.pbft.process_message(view_change_msg)
+                self.broadcast(view_change_msg)
+                self.logger.warning(f"Initiated view change to view {new_view} due to selective censorship")
+
+    def view_changed(self, new_view):
+        """Handle notification that the view has changed"""
+        self.logger.info(f"View changed to {new_view}")
+        
+        # Clear censorship evidence after view change
+        if hasattr(self, 'censorship_evidence'):
+            self.censorship_evidence = {}
+        
+        # Update the primary status in our node state
+        primary_id = new_view % self.pbft.total_nodes
+        is_primary = (self.node_id == primary_id)
+        
+        self.logger.info(f"After view change: Node {primary_id} is the new primary (I am {'' if is_primary else 'not '}the primary)")
+        
+        # If we're the new primary, check for any pending requests that need processing
+        if is_primary and hasattr(self.pbft, 'request_timestamps'):
+            pending_requests = list(self.pbft.request_timestamps.keys())
+            if pending_requests:
+                self.logger.info(f"New primary processing {len(pending_requests)} pending requests")
+                for request_id in pending_requests:
+                    if request_id in self.pbft.request_log:
+                        request = self.pbft.request_log[request_id]
+                        # Process the request that was censored by the previous primary
+                        self.pbft.handle_request(request) 

@@ -207,6 +207,21 @@ def main():
         clients[0].send_request(op)
         time.sleep(2)  # Wait between requests
     
+    # Start a timer to periodically check for censored requests
+    def start_censorship_check():
+        while True:
+            try:
+                for node in nodes:
+                    if node.running and not node.pbft.is_primary_node():
+                        node.check_for_censored_requests()
+            except Exception as e:
+                logger.error(f"Error in censorship check: {e}")
+            time.sleep(10)  # Check every 10 seconds
+    
+    censorship_thread = threading.Thread(target=start_censorship_check)
+    censorship_thread.daemon = True
+    censorship_thread.start()
+    
     # Interactive mode
     try:
         next_node_id = num_nodes
@@ -222,8 +237,9 @@ def main():
             print("8. Exit")
             print("9. Simulate primary node failure")
             print("10. Add a new node to the network")
+            print("11. Simulate selective censorship")
             
-            choice = input("Enter your choice (1-10): ")
+            choice = input("Enter your choice (1-11): ")
             
             if choice == '1':
                 operation_type = input("Enter operation type (SET/GET/DELETE): ").upper()
@@ -421,8 +437,69 @@ def main():
                 nodes.append(new_node)
                 print(f"Added new node with ID {new_node.node_id}")
             
+            elif choice == '11':
+                # Find the primary node
+                primary_node = None
+                for node in nodes:
+                    if node.pbft.is_primary_node():
+                        primary_node = node
+                        break
+                
+                if primary_node:
+                    print(f"Making primary node {primary_node.node_id} selectively malicious")
+                    
+                    # Create a list to track which requests to censor
+                    primary_node.censored_keys = []
+                    
+                    # Ask which key to censor
+                    key_to_censor = input("Enter a key that the primary should censor (e.g., 'key1'): ")
+                    primary_node.censored_keys.append(key_to_censor)
+                    
+                    # Override the handle_request method
+                    def selective_malicious_handle_request(self, message):
+                        operation = message.get('operation', '')
+                        request_id = message.get('request_id', '')
+                        
+                        # Check if this operation contains a censored key
+                        should_censor = False
+                        for censored_key in self.censored_keys:
+                            if censored_key in operation:
+                                should_censor = True
+                                break
+                        
+                        if should_censor:
+                            self.logger.info(f"MALICIOUS PRIMARY: Selectively censoring request {request_id} containing {self.censored_keys}")
+                            # Still store the request but don't process it
+                            self.pbft.request_log[request_id] = message
+                            if not hasattr(self.pbft, 'request_timestamps'):
+                                self.pbft.request_timestamps = {}
+                            self.pbft.request_timestamps[request_id] = time.time()
+                            
+                            # Make sure all backup nodes also know about this request
+                            for node in nodes:
+                                if node.node_id != self.node_id and node.running:
+                                    if not hasattr(node.pbft, 'request_timestamps'):
+                                        node.pbft.request_timestamps = {}
+                                    node.pbft.request_timestamps[request_id] = time.time()
+                                    node.pbft.request_log[request_id] = message
+                        
+                            return
+                        else:
+                            # Process normally
+                            self.logger.info(f"MALICIOUS PRIMARY: Processing non-censored request {request_id}")
+                            # Call the original method
+                            self.pbft.handle_request(message)
+                    
+                    import types
+                    primary_node.handle_request = types.MethodType(selective_malicious_handle_request, primary_node)
+                    
+                    print(f"Primary will now censor requests containing '{key_to_censor}'")
+                    print("Send requests with and without this key to test selective censorship detection")
+                else:
+                    print("Could not find primary node")
+            
             else:
-                print("Invalid choice. Please enter a number between 1 and 10.")
+                print("Invalid choice. Please enter a number between 1 and 11.")
     
     except KeyboardInterrupt:
         pass

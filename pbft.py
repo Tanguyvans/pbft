@@ -15,6 +15,7 @@ class PBFT:
         self.sequence_number = 0  # Sequence number for requests
         self.sequence_lock = threading.Lock()
         self._is_primary = (self.node_id == self.view % self.total_nodes)  # Use an underscore for the internal attribute
+        self.in_view_change = False
         
         # Message logs
         self.request_log = {}  # Store client requests
@@ -256,23 +257,19 @@ class PBFT:
         # Store the request
         self.request_log[request_id] = request
         
+        # Track when we received this request (for censorship detection)
+        if not hasattr(self, 'request_timestamps'):
+            self.request_timestamps = {}
+        self.request_timestamps[request_id] = time.time()
+        
         # If this node is the primary, start the consensus process
         if self.is_primary_node():
             self.logger.info(f"Primary node initiating consensus for request {request_id}")
             
-            # Get the next sequence number for this view
+            # Get the next sequence number
             with self.sequence_lock:
-                # Start from sequence 1 (not 0) for each view
-                view_key = f"view_{self.view}"
-                if not hasattr(self, 'view_sequence_numbers'):
-                    self.view_sequence_numbers = {}
-                
-                if view_key not in self.view_sequence_numbers:
-                    self.view_sequence_numbers[view_key] = 1
-                
-                seq_num = self.view_sequence_numbers[view_key]
-                self.view_sequence_numbers[view_key] += 1
-                self.sequence_number = seq_num  # Also update the global sequence number
+                seq_num = self.sequence_number
+                self.sequence_number += 1
             
             # Create pre-prepare message
             pre_prepare = {
