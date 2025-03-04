@@ -197,15 +197,22 @@ class PBFTNode:
         # Parse and execute the operation (simple key-value operations)
         try:
             parts = operation.split(' ', 2)  # Split only on the first two spaces
+
+            time.sleep(10)
             
             if parts[0] == 'SET' and len(parts) == 3:
                 key, value = parts[1], parts[2]
-                with self.state_lock:
-                    self.state[key] = value
-                    self.logger.info(f"SET {key} = {value}")
-                    result = f"SET {key} = {value}"
-                    state_changed = True
-                    self.logger.info(f"State changed: {state_changed}")
+                # Validate that value must have a length of exactly 3
+                if len(value) != 3:
+                    self.logger.warning(f"Invalid value length: {value}. Values must be exactly 3 characters.")
+                    result = f"ERROR: Values must be exactly 3 characters long. Got '{value}' with length {len(value)}."
+                else:
+                    with self.state_lock:
+                        self.state[key] = value
+                        self.logger.info(f"SET {key} = {value}")
+                        result = f"SET {key} = {value}"
+                        state_changed = True
+                        self.logger.info(f"State changed: {state_changed}")
             
             elif parts[0] == 'GET' and len(parts) == 2:
                 key = parts[1]
