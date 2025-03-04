@@ -612,7 +612,7 @@ class PBFTNode:
     def check_for_censored_requests(self):
         """Check if any requests have been censored by the primary"""
         # Only backup nodes check for censorship
-        if self.pbft.is_primary_node():
+        if self.pbft.is_primary_node() or self.pbft.in_view_change:
             return
         
         if not hasattr(self.pbft, 'request_timestamps'):
@@ -700,6 +700,10 @@ class PBFTNode:
         if hasattr(self, 'censorship_evidence'):
             self.censorship_evidence = {}
         
+        # Clear request timestamps in PBFT to avoid false censorship detection
+        if hasattr(self.pbft, 'request_timestamps'):
+            self.pbft.request_timestamps = {}
+        
         # Update the primary status in our node state
         primary_id = new_view % self.pbft.total_nodes
         is_primary = (self.node_id == primary_id)
@@ -707,8 +711,8 @@ class PBFTNode:
         self.logger.info(f"After view change: Node {primary_id} is the new primary (I am {'' if is_primary else 'not '}the primary)")
         
         # If we're the new primary, check for any pending requests that need processing
-        if is_primary and hasattr(self.pbft, 'request_timestamps'):
-            pending_requests = list(self.pbft.request_timestamps.keys())
+        if is_primary and hasattr(self.pbft, 'request_log'):
+            pending_requests = list(self.pbft.request_log.keys())
             if pending_requests:
                 self.logger.info(f"New primary processing {len(pending_requests)} pending requests")
                 for request_id in pending_requests:
