@@ -153,8 +153,6 @@ class PBFTNode:
             self.handle_view_sync(message)
         elif msg_type == 'node-join':
             self.handle_node_join(message)
-        elif msg_type == 'ping':
-            self.handle_ping(message)
         else:
             self.logger.warning(f"Unknown message type: {msg_type}")
     
@@ -454,22 +452,6 @@ class PBFTNode:
         else:
             self.logger.info(f"This node is a backup for view {new_view}")
     
-    def handle_ping(self, message: Dict):
-        """Handle ping messages from clients"""
-        client_id = message.get('client_id')
-        timestamp = message.get('timestamp')
-        
-        # Send response with primary status
-        response = {
-            'type': 'pong',
-            'is_primary': self.pbft.is_primary_node(),
-            'view': self.pbft.view,
-            'timestamp': timestamp
-        }
-        
-        # Since we don't have the client socket directly, we'll need to
-        # modify the handle_client method to keep the socket open for response
-    
     def add_node(self, node_id: int, host: str, port: int):
         """Add a new node to the network"""
         # Check if the node already exists
@@ -698,32 +680,3 @@ class PBFTNode:
                 self.pbft.process_message(view_change_msg)
                 self.broadcast(view_change_msg)
                 self.logger.warning(f"Initiated view change to view {new_view} due to selective censorship")
-
-    def view_changed(self, new_view):
-        """Handle notification that the view has changed"""
-        self.logger.info(f"View changed to {new_view}")
-        
-        # Clear censorship evidence after view change
-        if hasattr(self, 'censorship_evidence'):
-            self.censorship_evidence = {}
-        
-        # Clear request timestamps in PBFT to avoid false censorship detection
-        if hasattr(self.pbft, 'request_timestamps'):
-            self.pbft.request_timestamps = {}
-        
-        # Update the primary status in our node state
-        primary_id = new_view % self.pbft.total_nodes
-        is_primary = (self.node_id == primary_id)
-        
-        self.logger.info(f"After view change: Node {primary_id} is the new primary (I am {'' if is_primary else 'not '}the primary)")
-        
-        # If we're the new primary, check for any pending requests that need processing
-        if is_primary and hasattr(self.pbft, 'request_log'):
-            pending_requests = list(self.pbft.request_log.keys())
-            if pending_requests:
-                self.logger.info(f"New primary processing {len(pending_requests)} pending requests")
-                for request_id in pending_requests:
-                    if request_id in self.pbft.request_log:
-                        request = self.pbft.request_log[request_id]
-                        # Process the request that was censored by the previous primary
-                        self.pbft.handle_request(request) 

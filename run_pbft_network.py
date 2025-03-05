@@ -164,8 +164,7 @@ def add_new_node(nodes, next_node_id, host='127.0.0.1', base_port=8000):
     return node, next_node_id + 1
 
 def main():
-    # Define node configurations
-    num_nodes = 4  # 4 nodes can tolerate 1 Byzantine fault
+    num_nodes = 4
     base_port = 10000
     
     nodes_config = []
@@ -222,7 +221,6 @@ def main():
     censorship_thread.daemon = True
     censorship_thread.start()
     
-    # Interactive mode
     try:
         next_node_id = num_nodes
         while True:

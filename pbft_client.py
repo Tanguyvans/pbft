@@ -36,26 +36,6 @@ class PBFTClient:
                 s.settimeout(1.0)  # Short timeout for primary check
                 s.connect((node['host'], node['port']))
                 
-                # Send a ping message to check if this is the primary
-                ping = {
-                    'type': 'ping',
-                    'client_id': self.client_id,
-                    'timestamp': timestamp
-                }
-                s.sendall(json.dumps(ping).encode('utf-8'))
-                
-                # Wait for response
-                response = s.recv(1024)
-                if response:
-                    resp_data = json.loads(response.decode('utf-8'))
-                    if resp_data.get('is_primary', False):
-                        # This is the primary, send the actual request
-                        s.sendall(json.dumps(request).encode('utf-8'))
-                        s.close()
-                        primary_found = True
-                        self.logger.info(f"Request sent to primary node {node['id']}")
-                        break
-                s.close()
             except Exception:
                 # Skip failed nodes
                 continue

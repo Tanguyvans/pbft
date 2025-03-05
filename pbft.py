@@ -125,7 +125,6 @@ class PBFT:
         view = message.get('view')
         seq = message.get('sequence')
         global_seq = message.get('global_sequence', seq)  # Use global sequence if available
-        request_id = message.get('request_id')
         digest = message.get('digest')
         sender = message.get('sender')
         
@@ -209,7 +208,6 @@ class PBFT:
         """Process a commit message"""
         view = message.get('view')
         seq = message.get('sequence')
-        digest = message.get('digest')
         sender = message.get('sender')
         
         self.logger.info(f"Processing commit from {sender} for seq {seq}")
@@ -476,13 +474,6 @@ class PBFT:
         # Clear view change logs for this view
         if new_view in self.view_change_log:
             del self.view_change_log[new_view]
-
-    def reissue_prepares(self):
-        """Re-issue pre-prepares for prepared requests from previous view"""
-        # This would re-issue pre-prepares for any requests that were prepared
-        # but not committed in the previous view
-        # Implementation depends on how you track prepared but uncommitted requests
-        pass
 
     def start_heartbeat_timer(self):
         """Start or restart the heartbeat timer for the primary"""
