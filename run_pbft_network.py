@@ -196,16 +196,6 @@ def main():
         client = PBFTClient(client_id=f"client{i}", nodes_config=nodes_config)
         clients.append(client)
     
-    # Initial operations to demonstrate functionality
-    operations = [
-        "SET key1 value1",
-        "SET key2 value2",
-    ]
-    
-    for op in operations:
-        clients[0].send_request(op)
-        time.sleep(2)  # Wait between requests
-    
     # Start a timer to periodically check for censored requests
     def start_censorship_check():
         while True:

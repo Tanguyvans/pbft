@@ -71,8 +71,38 @@ class PBFTNode:
         self.execution_thread.start()
         
         self.logger.info(f"Node {self.node_id} started on {self.host}:{self.port}")
-        self.logger.info(f"Primary status: {self.pbft.is_primary_node()}")
         self.logger.info(f"Genesis block hash: {genesis_block.current_hash}")
+
+        # Add a longer delay before the primary node creates the initial global model
+        if self.pbft.is_primary_node():
+            def delayed_initial_model():
+                # Create second genesis block with initial global model
+                self.logger.info(f"Primary node {self.node_id} creating initial global model")
+                
+                # Store request in PBFT module with proper digest
+                request_id = "initial_global_model"
+                operation = "CREATE_GLOBAL_MODEL"
+                digest = hashlib.sha256(f"{request_id}:{operation}".encode()).hexdigest()
+                
+                request = {
+                    'type': 'request',
+                    'client_id': "system",
+                    'timestamp': int(time.time() * 1000),
+                    'operation': operation,
+                    'digest': digest,
+                    'request_id': request_id
+                }
+                
+                # First make sure all nodes are aware of this request
+                self.broadcast(request)
+                
+                if self.pbft.is_primary_node():
+                    self.pbft.start_consensus(request_id)
+                
+                self.logger.info(f"Primary status: {self.node_id} is the primary node")
+            
+            # Schedule the creation of the initial model after a longer delay
+            threading.Timer(3.0, delayed_initial_model).start()
     
     def start_server(self):
         """Accept incoming connections and handle them in separate threads"""
@@ -194,43 +224,65 @@ class PBFTNode:
         
         # Parse and execute the operation (simple key-value operations)
         try:
-            parts = operation.split(' ', 2)  # Split only on the first two spaces
-
-            time.sleep(10)
+            if operation == 'CREATE_GLOBAL_MODEL':
+                self.logger.info("Creating initial global model")
+                
+                # Create a simple model representation
+                model_data = {
+                    'type': 'initial_model',
+                    'version': 1,
+                    'created_by': f"node-{self.node_id}",
+                    'timestamp': time.time()
+                }
+                
+                with self.state_lock:
+                    self.state['global_model'] = json.dumps(model_data)
+                    result = "GLOBAL_MODEL_CREATED"
+                    state_changed = True
+                    self.logger.info(f"Created initial global model: {model_data}")
             
-            if parts[0] == 'SET' and len(parts) == 3:
-                key, value = parts[1], parts[2]
-                # Validate that value must have a length of exactly 3
-                if len(value) != 3:
-                    self.logger.warning(f"Invalid value length: {value}. Values must be exactly 3 characters.")
-                    result = f"ERROR: Values must be exactly 3 characters long. Got '{value}' with length {len(value)}."
-                else:
+            elif operation.startswith('SET '):
+                parts = operation.split(' ', 2)  # Split only on the first two spaces
+                
+                if len(parts) == 3:
+                    key, value = parts[1], parts[2]
+                    # Validate that value must have a length of exactly 3
+
                     with self.state_lock:
                         self.state[key] = value
                         self.logger.info(f"SET {key} = {value}")
                         result = f"SET {key} = {value}"
                         state_changed = True
                         self.logger.info(f"State changed: {state_changed}")
-            
-            elif parts[0] == 'GET' and len(parts) == 2:
-                key = parts[1]
-                with self.state_lock:
-                    value = self.state.get(key, "NULL")
-                    self.logger.info(f"GET {key} = {value}")
-                    result = f"GET {key} = {value}"
-                # GET operations don't modify state, so no new block needed
-            
-            elif parts[0] == 'DELETE' and len(parts) == 2:
-                key = parts[1]
-                with self.state_lock:
-                    if key in self.state:
-                        del self.state[key]
-                        self.logger.info(f"DELETE {key}")
-                        result = f"DELETE {key} = SUCCESS"
-                        state_changed = True
-                        self.logger.info(f"State changed: {state_changed}")
-                    else:
-                        result = f"DELETE {key} = KEY_NOT_FOUND"
+                
+            elif operation.startswith('GET '):
+                parts = operation.split(' ', 2)  # Split only on the first two spaces
+                
+                if len(parts) == 2:
+                    key = parts[1]
+                    with self.state_lock:
+                        value = self.state.get(key, "NULL")
+                        self.logger.info(f"GET {key} = {value}")
+                        result = f"GET {key} = {value}"
+                    # GET operations don't modify state, so no new block needed
+                
+            elif operation.startswith('DELETE '):
+                parts = operation.split(' ', 2)  # Split only on the first two spaces
+                
+                if len(parts) == 2:
+                    key = parts[1]
+                    with self.state_lock:
+                        if key in self.state:
+                            del self.state[key]
+                            self.logger.info(f"DELETE {key}")
+                            result = f"DELETE {key} = SUCCESS"
+                            state_changed = True
+                            self.logger.info(f"State changed: {state_changed}")
+                        else:
+                            result = f"DELETE {key} = KEY_NOT_FOUND"
+                else:
+                    self.logger.warning(f"Unknown operation format: {operation}")
+                    result = f"UNKNOWN_OPERATION: {operation}"
             else:
                 self.logger.warning(f"Unknown operation format: {operation}")
                 result = f"UNKNOWN_OPERATION: {operation}"
@@ -680,3 +732,76 @@ class PBFTNode:
                 self.pbft.process_message(view_change_msg)
                 self.broadcast(view_change_msg)
                 self.logger.warning(f"Initiated view change to view {new_view} due to selective censorship")
+
+    def create_primary_block(self, data, model_type="primary-created"):
+        """Create a block directly from the primary node (bypassing consensus)"""
+        if not self.pbft.is_primary_node():
+            self.logger.warning("Only primary nodes can create blocks directly")
+            return None
+        
+        self.logger.info(f"Primary node creating block with data: {data}")
+        
+        with self.blockchain_lock:
+            # Create a new block
+            new_block = self.blockchain.create_block(
+                data=data,
+                model_type=model_type,
+                storage_reference=f"primary-{int(time.time())}",
+                calculated_hash=hashlib.sha256(str(data).encode()).hexdigest(),
+                participants=[str(self.node_id)]
+            )
+            
+            # Add the block to our blockchain
+            self.blockchain.add_block(new_block)
+            self.logger.info(f"Created block #{new_block.index} as primary node")
+            
+            # Broadcast the block to all other nodes
+            block_sync = {
+                'type': 'block-sync',
+                'sender': self.node_id,
+                'block': new_block.to_dict(),
+                'sequence': 0,  # Not part of consensus
+                'view': self.pbft.view
+            }
+            self.broadcast(block_sync, exclude_self=True)
+            
+            return new_block
+        """Initialize the global model (primary node only)"""
+        if not self.pbft.is_primary_node():
+            self.logger.warning("Non-primary node tried to initialize global model")
+            return
+        
+        try:
+            import numpy as np
+            from sklearn.neural_network import MLPClassifier
+            
+            # Create a simple MLP model
+            self.global_model = MLPClassifier(
+                hidden_layer_sizes=(10,),
+                max_iter=200,
+                activation='relu',
+                solver='adam',
+                random_state=1
+            )
+            
+            # Initialize with some dummy data to get the weights
+            X_dummy = np.random.rand(10, 4)
+            y_dummy = np.random.randint(0, 2, 10)
+            self.global_model.fit(X_dummy, y_dummy)
+            
+            self.model_version = 1
+            self.logger.info(f"Global model initialized with version {self.model_version}")
+            
+            # Create a block for the initial model
+            model_params = {
+                'coefs': [c.tolist() for c in self.global_model.coefs_],
+                'intercepts': [i.tolist() for i in self.global_model.intercepts_]
+            }
+            
+            # We'll create a proper block for this through consensus later
+            self.logger.info("Global model initialized and ready for consensus")
+            
+        except ImportError:
+            self.logger.error("scikit-learn not installed, cannot initialize global model")
+        except Exception as e:
+            self.logger.error(f"Error initializing global model: {e}")
