@@ -5,6 +5,13 @@ import logging
 from pbft_node import PBFTNode
 from pbft_client import PBFTClient
 
+from going_modular.utils import initialize_parameters
+from going_modular.data_setup import load_dataset
+from config import settings
+
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("PBFT-Network")
@@ -164,9 +171,20 @@ def add_new_node(nodes, next_node_id, host='127.0.0.1', base_port=8000):
     return node, next_node_id + 1
 
 def main():
-    num_nodes = 4
+    logging.basicConfig(level=logging.DEBUG)
+    training_barrier, length = initialize_parameters(settings)
+
+    print(training_barrier, length)
+
+    num_nodes = settings['number_of_nodes']
+    num_clients = settings['number_of_clients']
     base_port = 10000
-    
+
+    (client_train_sets, client_test_sets, node_test_sets, list_classes) = load_dataset(length, settings['name_dataset'],
+                                                                                    settings['data_root'],
+                                                                                    settings['number_of_clients'],
+                                                                                    settings['number_of_nodes'])
+
     nodes_config = []
     for i in range(num_nodes):
         nodes_config.append({
@@ -182,7 +200,8 @@ def main():
             node_id=i,
             host='localhost',
             port=base_port + i,
-            nodes_config=nodes_config
+            nodes_config=nodes_config,
+            test_set=node_test_sets[i]
         )
         nodes.append(node)
         logger.info(f"Started node {i} on port {base_port + i}")
@@ -192,8 +211,13 @@ def main():
     
     # Create clients
     clients = []
-    for i in range(num_nodes):
-        client = PBFTClient(client_id=f"client{i}", nodes_config=nodes_config)
+    for i in range(num_clients):
+        client = PBFTClient(
+            client_id=f"client{i}", 
+            nodes_config=nodes_config,
+            client_train_set=client_train_sets[i],
+            client_test_set=client_test_sets[i]
+            )
         clients.append(client)
     
     # Start a timer to periodically check for censored requests
@@ -226,8 +250,9 @@ def main():
             print("9. Simulate primary node failure")
             print("10. Add a new node to the network")
             print("11. Simulate selective censorship")
+            print("12. Train clients")
             
-            choice = input("Enter your choice (1-11): ")
+            choice = input("Enter your choice (1-12): ")
             
             if choice == '1':
                 operation_type = input("Enter operation type (SET/GET/DELETE): ").upper()
@@ -486,6 +511,10 @@ def main():
                 else:
                     print("Could not find primary node")
             
+            elif choice == '12':
+                for client in clients:
+                    client.train()
+
             else:
                 print("Invalid choice. Please enter a number between 1 and 11.")
     

@@ -3,19 +3,20 @@ import threading
 import json
 import time
 import hashlib
-import random
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List
 import logging
 import queue
 from blockchain import Blockchain
 from block import Block
 from pbft import PBFT
 
+from flowerclient import FlowerClient
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 class PBFTNode:
-    def __init__(self, node_id: int, host: str, port: int, nodes_config: List[Dict]):
+    def __init__(self, node_id: int, host: str, port: int, nodes_config: List[Dict], test_set):
         self.node_id = node_id
         self.host = host
         self.port = port
@@ -30,25 +31,17 @@ class PBFTNode:
         self.last_executed_seq = 0
         self.execution_queue = queue.PriorityQueue()  # Queue for ordered execution
         self.executed_requests = set()  # Track executed request IDs
+
+        x_test, y_test = test_set
+
+        self.flower_client = FlowerClient.node(
+            x_test=x_test, 
+            y_test=y_test
+        )
+        
         
         # Initialize blockchain with a deterministic genesis block
         self.blockchain = Blockchain()
-        # Remove the default genesis block
-        self.blockchain.blocks = []
-        # Create a deterministic genesis block with fixed timestamp and nonce
-        genesis_block = Block(
-            index=0,
-            data={"message": "Genesis Block"},
-            model_type="genesis",
-            storage_reference="",
-            calculated_hash="",
-            participants=["system"],
-            previous_hash=""
-        )
-        # Set fixed values to ensure identical hash across all nodes
-        genesis_block.timestamp = 1000000000  # Fixed timestamp
-        genesis_block.nonce = 0
-        self.blockchain.add_block(genesis_block)
         
         # Locks for thread safety
         self.state_lock = threading.Lock()
@@ -71,7 +64,6 @@ class PBFTNode:
         self.execution_thread.start()
         
         self.logger.info(f"Node {self.node_id} started on {self.host}:{self.port}")
-        self.logger.info(f"Genesis block hash: {genesis_block.current_hash}")
 
         # Add a longer delay before the primary node creates the initial global model
         if self.pbft.is_primary_node():
@@ -183,6 +175,8 @@ class PBFTNode:
             self.handle_view_sync(message)
         elif msg_type == 'node-join':
             self.handle_node_join(message)
+        elif msg_type == 'model-request':
+            self.handle_model_request(message)
         else:
             self.logger.warning(f"Unknown message type: {msg_type}")
     
@@ -222,24 +216,82 @@ class PBFTNode:
         result = None
         state_changed = False
         
-        # Parse and execute the operation (simple key-value operations)
+        # Parse and execute the operation
         try:
             if operation == 'CREATE_GLOBAL_MODEL':
                 self.logger.info("Creating initial global model")
                 
-                # Create a simple model representation
-                model_data = {
-                    'type': 'initial_model',
-                    'version': 1,
-                    'created_by': f"node-{self.node_id}",
-                    'timestamp': time.time()
-                }
+                # Create models directory if it doesn't exist
+                import os
+                models_dir = "models"
+                if not os.path.exists(models_dir):
+                    os.makedirs(models_dir)
                 
-                with self.state_lock:
-                    self.state['global_model'] = json.dumps(model_data)
-                    result = "GLOBAL_MODEL_CREATED"
-                    state_changed = True
-                    self.logger.info(f"Created initial global model: {model_data}")
+                # Initialize the actual global model object
+                try:
+                    import numpy as np
+                    from sklearn.neural_network import MLPClassifier
+                    
+                    # Create a simple MLP model
+                    self.global_model = MLPClassifier(
+                        hidden_layer_sizes=(10,),
+                        max_iter=200,
+                        activation='relu',
+                        solver='adam',
+                        random_state=1
+                    )
+                    
+                    # Initialize with some dummy data
+                    X_dummy = np.random.rand(10, 4)
+                    y_dummy = np.random.randint(0, 2, 10)
+                    self.global_model.fit(X_dummy, y_dummy)
+                    
+                    self.model_version = 1
+                    
+                    # Save the model to disk using npz format
+                    timestamp = int(time.time())
+                    model_filename = f"global_model_v{self.model_version}_{timestamp}.npz"
+                    model_path = os.path.join(models_dir, model_filename)
+                    
+                    # Save each parameter array separately
+                    save_dict = {}
+                    for i, coef in enumerate(self.global_model.coefs_):
+                        save_dict[f'coefs_{i}'] = coef
+                    for i, intercept in enumerate(self.global_model.intercepts_):
+                        save_dict[f'intercepts_{i}'] = intercept
+                    
+                    # Save as npz file
+                    np.savez(model_path, **save_dict)
+                    
+                    # Calculate hash of the model file
+                    model_hash = ""
+                    with open(model_path, 'rb') as f:
+                        model_hash = hashlib.sha256(f.read()).hexdigest()
+                    
+                    self.logger.info(f"Global model saved to {model_path} with hash {model_hash}")
+                    
+                    # Create model metadata for blockchain
+                    model_data = {
+                        'type': 'initial_model',
+                        'version': self.model_version,
+                        'created_by': f"node-{self.node_id}",
+                        'timestamp': timestamp,
+                        'storage_path': model_path,
+                        'hash': model_hash
+                    }
+                    
+                    with self.state_lock:
+                        self.state['global_model'] = json.dumps(model_data)
+                        result = "GLOBAL_MODEL_CREATED"
+                        state_changed = True
+                        self.logger.info(f"Created initial global model: {model_data}")
+                    
+                except ImportError:
+                    self.logger.error("scikit-learn not installed, cannot initialize global model")
+                    result = "ERROR: scikit-learn not installed"
+                except Exception as e:
+                    self.logger.error(f"Error initializing global model: {e}")
+                    result = f"ERROR: {str(e)}"
             
             elif operation.startswith('SET '):
                 parts = operation.split(' ', 2)  # Split only on the first two spaces
@@ -477,7 +529,6 @@ class PBFTNode:
         self.server_socket.close()
         self.logger.info(f"Node {self.node_id} stopped")
     
-    # Callback methods for PBFT
     def on_consensus_reached(self, sequence: int, request: Dict):
         """Called by PBFT when consensus is reached for a request"""
         request_id = request.get('request_id', '')
@@ -650,6 +701,124 @@ class PBFTNode:
                 
                 self.logger.info(f"Sent state and blockchain to new node {sender}")
 
+    def handle_model_request(self, message: Dict):
+        """Handle a request for the global model"""
+        client_id = message.get('client_id', '')
+        request_id = message.get('request_id', '')
+        
+        self.logger.info(f"Handling model request from client {client_id}")
+        
+        # Check if we have global model info in our state
+        global_model_info = None
+        with self.state_lock:
+            if 'global_model' in self.state:
+                try:
+                    global_model_info = json.loads(self.state['global_model'])
+                except:
+                    self.logger.error("Failed to parse global model info from state")
+        
+        if not global_model_info:
+            self.logger.warning("No global model information available")
+            response = {
+                'type': 'model-response',
+                'status': 'error',
+                'message': 'No global model available',
+                'request_id': request_id
+            }
+        else:
+            try:
+                # Load the model from disk if needed
+                if not hasattr(self, 'global_model') or self.global_model is None:
+                    import numpy as np
+                    from sklearn.neural_network import MLPClassifier
+                    
+                    model_path = global_model_info.get('storage_path')
+                    
+                    if not model_path or not os.path.exists(model_path):
+                        self.logger.error(f"Model file not found: {model_path}")
+                        raise FileNotFoundError(f"Model file not found: {model_path}")
+                    
+                    # Load model parameters from npz file
+                    model_params = np.load(model_path)
+                    
+                    # Create a new model instance
+                    self.global_model = MLPClassifier(
+                        hidden_layer_sizes=(10,),
+                        max_iter=200,
+                        activation='relu',
+                        solver='adam'
+                    )
+                    
+                    # Initialize with dummy data to set up the structure
+                    X_dummy = np.random.rand(10, 4)
+                    y_dummy = np.random.randint(0, 2, 10)
+                    self.global_model.fit(X_dummy, y_dummy)
+                    
+                    # Set the weights from the loaded parameters
+                    self.global_model.coefs_ = [model_params[f'coefs_{i}'] for i in range(len(model_params.files)) if f'coefs_{i}' in model_params]
+                    self.global_model.intercepts_ = [model_params[f'intercepts_{i}'] for i in range(len(model_params.files)) if f'intercepts_{i}' in model_params]
+                    
+                    self.model_version = global_model_info.get('version', 1)
+                    self.logger.info(f"Loaded global model from {model_path}")
+                
+                # Extract model parameters
+                model_params = {
+                    'coefs': [c.tolist() for c in self.global_model.coefs_],
+                    'intercepts': [i.tolist() for i in self.global_model.intercepts_]
+                }
+                
+                response = {
+                    'type': 'model-response',
+                    'status': 'success',
+                    'version': self.model_version,
+                    'model_params': model_params,
+                    'model_info': global_model_info,
+                    'request_id': request_id
+                }
+                
+                self.logger.info(f"Sending global model to client {client_id}")
+            
+            except Exception as e:
+                self.logger.error(f"Error preparing model response: {e}")
+                response = {
+                    'type': 'model-response',
+                    'status': 'error',
+                    'message': str(e),
+                    'request_id': request_id
+                }
+        
+        # Send the response back to the client
+        try:
+            # Get the client socket from the current connection handler
+            # This is stored in the thread_local storage when handling client connections
+            if hasattr(threading.current_thread(), 'client_socket'):
+                client_socket = threading.current_thread().client_socket
+                client_socket.sendall(json.dumps(response).encode('utf-8'))
+                self.logger.info(f"Sent model response to client {client_id}")
+            else:
+                # If we can't find the client socket in the current thread,
+                # we need to send the response back through the server socket
+                self.logger.info(f"No client socket in current thread, sending response through server")
+                
+                # The client should have sent its connection info
+                client_host = message.get('client_host', 'localhost')
+                client_port = message.get('client_port', 0)
+                
+                if client_port > 0:
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.connect((client_host, client_port))
+                        s.sendall(json.dumps(response).encode('utf-8'))
+                        s.close()
+                        self.logger.info(f"Sent model response to client {client_id} at {client_host}:{client_port}")
+                    except Exception as e:
+                        self.logger.error(f"Error sending response to client: {e}")
+                else:
+                    self.logger.error(f"Cannot send response: no client socket and no valid client port")
+        
+        except Exception as e:
+            self.logger.error(f"Error sending model response: {e}")
+
     def check_for_censored_requests(self):
         """Check if any requests have been censored by the primary"""
         # Only backup nodes check for censorship
@@ -766,42 +935,3 @@ class PBFTNode:
             self.broadcast(block_sync, exclude_self=True)
             
             return new_block
-        """Initialize the global model (primary node only)"""
-        if not self.pbft.is_primary_node():
-            self.logger.warning("Non-primary node tried to initialize global model")
-            return
-        
-        try:
-            import numpy as np
-            from sklearn.neural_network import MLPClassifier
-            
-            # Create a simple MLP model
-            self.global_model = MLPClassifier(
-                hidden_layer_sizes=(10,),
-                max_iter=200,
-                activation='relu',
-                solver='adam',
-                random_state=1
-            )
-            
-            # Initialize with some dummy data to get the weights
-            X_dummy = np.random.rand(10, 4)
-            y_dummy = np.random.randint(0, 2, 10)
-            self.global_model.fit(X_dummy, y_dummy)
-            
-            self.model_version = 1
-            self.logger.info(f"Global model initialized with version {self.model_version}")
-            
-            # Create a block for the initial model
-            model_params = {
-                'coefs': [c.tolist() for c in self.global_model.coefs_],
-                'intercepts': [i.tolist() for i in self.global_model.intercepts_]
-            }
-            
-            # We'll create a proper block for this through consensus later
-            self.logger.info("Global model initialized and ready for consensus")
-            
-        except ImportError:
-            self.logger.error("scikit-learn not installed, cannot initialize global model")
-        except Exception as e:
-            self.logger.error(f"Error initializing global model: {e}")

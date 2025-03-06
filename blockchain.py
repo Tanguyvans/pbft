@@ -10,7 +10,6 @@ class Blockchain:
         self.add_genesis_block()
     
     def add_genesis_block(self):
-        """Create the first block in the chain"""
         genesis_block = Block(
             index=0,
             data={"message": "Genesis Block"},
@@ -20,10 +19,12 @@ class Blockchain:
             participants=["system"],
             previous_hash=""
         )
-        self.blocks.append(genesis_block)
+        # Set fixed values to ensure identical hash across all nodes
+        genesis_block.timestamp = 1000000000  # Fixed timestamp
+        genesis_block.nonce = 0
+        self.add_block(genesis_block)
     
     def add_block(self, block):
-        """Add a new block to the chain"""
         self.blocks.append(block)
     
     def create_block(self, data, model_type="", storage_reference="", calculated_hash="", participants=None):
