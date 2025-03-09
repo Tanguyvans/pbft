@@ -13,11 +13,11 @@ import os
 
 
 class FlowerClient(fl.client.NumPyClient):
-    def __init__(self, batch_size=10, epochs=1, model_choice="simpleNet", dp=False, delta=1e-5, epsilon=0.5,
+    def __init__(self, batch_size=10, epochs=1, model_choice="mobilenet", dp=False, delta=1e-5, epsilon=0.5,
                  max_grad_norm=1.2, device="gpu", classes=(*range(10),),
                  learning_rate=0.001, choice_loss="cross_entropy", choice_optimizer="Adam", choice_scheduler=None,
                  step_size=5, gamma=0.1,
-                 save_figure=None, matrix_path=None, roc_path=None, patience=2, pretrained=True, save_model=None):
+                 save_figure=None, matrix_path=None, roc_path=None, patience=2, pretrained=True, save_model="models/"):
 
         self.batch_size = batch_size
         self.epochs = epochs

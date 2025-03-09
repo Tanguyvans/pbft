@@ -3,12 +3,15 @@ import threading
 import json
 import time
 import hashlib
+import os
 from typing import Dict, List
 import logging
 import queue
 from blockchain import Blockchain
 from block import Block
 from pbft import PBFT
+import numpy as np
+from sklearn.neural_network import MLPClassifier
 
 from flowerclient import FlowerClient
 
@@ -38,7 +41,6 @@ class PBFTNode:
             x_test=x_test, 
             y_test=y_test
         )
-        
         
         # Initialize blockchain with a deterministic genesis block
         self.blockchain = Blockchain()
@@ -222,46 +224,20 @@ class PBFTNode:
                 self.logger.info("Creating initial global model")
                 
                 # Create models directory if it doesn't exist
-                import os
                 models_dir = "models"
                 if not os.path.exists(models_dir):
                     os.makedirs(models_dir)
                 
-                # Initialize the actual global model object
+                # Initialize the model
                 try:
-                    import numpy as np
-                    from sklearn.neural_network import MLPClassifier
+                    params_dict = self.flower_client.get_dict_params({})
                     
-                    # Create a simple MLP model
-                    self.global_model = MLPClassifier(
-                        hidden_layer_sizes=(10,),
-                        max_iter=200,
-                        activation='relu',
-                        solver='adam',
-                        random_state=1
-                    )
-                    
-                    # Initialize with some dummy data
-                    X_dummy = np.random.rand(10, 4)
-                    y_dummy = np.random.randint(0, 2, 10)
-                    self.global_model.fit(X_dummy, y_dummy)
-                    
-                    self.model_version = 1
-                    
-                    # Save the model to disk using npz format
                     timestamp = int(time.time())
-                    model_filename = f"global_model_v{self.model_version}_{timestamp}.npz"
+                    model_filename = f"global_model_v1_{timestamp}.npz"
                     model_path = os.path.join(models_dir, model_filename)
                     
-                    # Save each parameter array separately
-                    save_dict = {}
-                    for i, coef in enumerate(self.global_model.coefs_):
-                        save_dict[f'coefs_{i}'] = coef
-                    for i, intercept in enumerate(self.global_model.intercepts_):
-                        save_dict[f'intercepts_{i}'] = intercept
-                    
-                    # Save as npz file
-                    np.savez(model_path, **save_dict)
+                    # Save parameters to npz file
+                    np.savez(model_path, **params_dict)
                     
                     # Calculate hash of the model file
                     model_hash = ""
@@ -273,11 +249,13 @@ class PBFTNode:
                     # Create model metadata for blockchain
                     model_data = {
                         'type': 'initial_model',
-                        'version': self.model_version,
+                        'version': 1,
                         'created_by': f"node-{self.node_id}",
                         'timestamp': timestamp,
                         'storage_path': model_path,
-                        'hash': model_hash
+                        'hash': model_hash,
+                        'architecture': 'mobilenet_v2',
+                        'num_classes': 10
                     }
                     
                     with self.state_lock:
@@ -286,9 +264,9 @@ class PBFTNode:
                         state_changed = True
                         self.logger.info(f"Created initial global model: {model_data}")
                     
-                except ImportError:
-                    self.logger.error("scikit-learn not installed, cannot initialize global model")
-                    result = "ERROR: scikit-learn not installed"
+                except ImportError as e:
+                    self.logger.error(f"Required libraries not installed: {e}")
+                    result = f"ERROR: {str(e)}"
                 except Exception as e:
                     self.logger.error(f"Error initializing global model: {e}")
                     result = f"ERROR: {str(e)}"
@@ -727,56 +705,27 @@ class PBFTNode:
             }
         else:
             try:
-                # Load the model from disk if needed
-                if not hasattr(self, 'global_model') or self.global_model is None:
-                    import numpy as np
-                    from sklearn.neural_network import MLPClassifier
-                    
-                    model_path = global_model_info.get('storage_path')
-                    
-                    if not model_path or not os.path.exists(model_path):
-                        self.logger.error(f"Model file not found: {model_path}")
-                        raise FileNotFoundError(f"Model file not found: {model_path}")
-                    
-                    # Load model parameters from npz file
-                    model_params = np.load(model_path)
-                    
-                    # Create a new model instance
-                    self.global_model = MLPClassifier(
-                        hidden_layer_sizes=(10,),
-                        max_iter=200,
-                        activation='relu',
-                        solver='adam'
-                    )
-                    
-                    # Initialize with dummy data to set up the structure
-                    X_dummy = np.random.rand(10, 4)
-                    y_dummy = np.random.randint(0, 2, 10)
-                    self.global_model.fit(X_dummy, y_dummy)
-                    
-                    # Set the weights from the loaded parameters
-                    self.global_model.coefs_ = [model_params[f'coefs_{i}'] for i in range(len(model_params.files)) if f'coefs_{i}' in model_params]
-                    self.global_model.intercepts_ = [model_params[f'intercepts_{i}'] for i in range(len(model_params.files)) if f'intercepts_{i}' in model_params]
-                    
-                    self.model_version = global_model_info.get('version', 1)
-                    self.logger.info(f"Loaded global model from {model_path}")
+                # Get the model file path and hash
+                model_path = global_model_info.get('storage_path')
+                model_hash = global_model_info.get('hash')
                 
-                # Extract model parameters
-                model_params = {
-                    'coefs': [c.tolist() for c in self.global_model.coefs_],
-                    'intercepts': [i.tolist() for i in self.global_model.intercepts_]
-                }
+                if not model_path or not os.path.exists(model_path):
+                    self.logger.error(f"Model file not found: {model_path}")
+                    raise FileNotFoundError(f"Model file not found: {model_path}")
                 
+                # Send only the model location and hash
                 response = {
                     'type': 'model-response',
                     'status': 'success',
-                    'version': self.model_version,
-                    'model_params': model_params,
-                    'model_info': global_model_info,
+                    'version': global_model_info.get('version', 1),
+                    'model_path': model_path,
+                    'model_hash': model_hash,
+                    'architecture': global_model_info.get('architecture', 'mobilenet_v2'),
+                    'num_classes': global_model_info.get('num_classes', 10),
                     'request_id': request_id
                 }
                 
-                self.logger.info(f"Sending global model to client {client_id}")
+                self.logger.info(f"Sending global model info to client {client_id}")
             
             except Exception as e:
                 self.logger.error(f"Error preparing model response: {e}")

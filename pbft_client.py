@@ -4,6 +4,8 @@ import json
 import logging
 import hashlib
 from sklearn.model_selection import train_test_split
+import os
+import numpy as np
 
 from flowerclient import FlowerClient
 
@@ -78,7 +80,7 @@ class PBFTClient:
         return True 
 
     def get_global_model(self):
-        """Request the current global model from the network"""
+        """Request the current global model info from the network"""
         self.logger.info("Requesting global model from the network")
         
         # Create a unique request ID
@@ -127,7 +129,7 @@ class PBFTClient:
                     continue
             
             # Wait for response from any node
-            model_params = None
+            model_info = None
             start_time = time.time()
             got_response = False
             
@@ -144,16 +146,24 @@ class PBFTClient:
                         response_data += chunk
                     
                     client_socket.close()
+
+                    print("the response data is: ", response_data)
                     
-                    if response_data and not got_response:
-                        response = json.loads(response_data.decode('utf-8'))
-                        if response.get('status') == 'success':
-                            self.logger.info(f"Received global model from {addr}")
-                            model_params = response.get('model_params')
-                            got_response = True
-                            # Don't break here - keep accepting connections to avoid refused connections
-                        else:
-                            self.logger.error(f"Error from node: {response.get('message')}")
+                    if response_data:
+                        try:
+                            response = json.loads(response_data.decode('utf-8'))
+                            self.logger.info(f"Parsed response: {response}")
+                            
+                            if response.get('status') == 'success' and not got_response:
+                                self.logger.info(f"Received global model info from {addr}")
+                                model_info = response
+                                got_response = True
+                                # Don't break here - keep accepting connections to avoid refused connections
+                            elif response.get('status') == 'error':
+                                self.logger.error(f"Error from node: {response.get('message')}")
+                        except json.JSONDecodeError as e:
+                            self.logger.error(f"Failed to parse response as JSON: {e}")
+                            self.logger.debug(f"Raw response: {response_data}")
                 except socket.timeout:
                     # If we already got a response, we can stop waiting
                     if got_response:
@@ -163,7 +173,12 @@ class PBFTClient:
                     self.logger.error(f"Error receiving response: {e}")
                     continue
             
-            return model_params
+            if model_info:
+                self.logger.info(f"Successfully received model info: {model_info}")
+            else:
+                self.logger.error("Did not receive valid model info from any node")
+            
+            return model_info
         
         finally:
             # Always close the response socket
@@ -171,19 +186,62 @@ class PBFTClient:
             response_socket.close()
 
     def train(self):       
-        global_model_params = self.get_global_model()
+        """Train a local model based on the global model"""
+        # First, get the global model info
+        model_info = self.get_global_model()
+        
+        if not model_info:
+            self.logger.error("Cannot train without global model info")
+            return None, None, None
+        
+        self.logger.info(f"Received global model info: {model_info}")
+        
+        # Extract model path and hash
+        model_path = model_info.get('model_path')
+        model_hash = model_info.get('model_hash')
+        architecture = model_info.get('architecture', 'mobilenet_v2')
+        
+        # Verify the model file exists
+        if not os.path.exists(model_path):
+            self.logger.error(f"Model file not found: {model_path}")
+            return None, None, None
+        
+        # Verify the model hash
+        with open(model_path, 'rb') as f:
+            file_content = f.read()
+            file_hash = hashlib.sha256(file_content).hexdigest()
+        
+        # Get all model hashes from all nodes
+        all_hashes = set()
+        for node in self.nodes:
+            try:
+                node_path = f"models/global_model_v1_{model_path.split('_')[-1]}"
+                if os.path.exists(node_path):
+                    with open(node_path, 'rb') as f:
+                        node_hash = hashlib.sha256(f.read()).hexdigest()
+                        all_hashes.add(node_hash)
+            except Exception as e:
+                self.logger.warning(f"Could not check hash for node model: {e}")
+        
+        self.logger.info(f"All possible model hashes: {all_hashes}")
+        
+        if file_hash != model_hash and file_hash not in all_hashes:
+            self.logger.error(f"Model hash verification failed. Expected one of {all_hashes}, got {file_hash}")
+            return None, None, None
+        
+        self.logger.info(f"Model hash verified successfully")
 
-        print("the glboal model params are: ", len(global_model_params))
+        loaded_weights_dict = np.load(model_path)
+        loaded_weights = [val for name, val in loaded_weights_dict.items() if 'bn' not in name and 'len_dataset' not in name]
 
-        # res, metrics = self.flower_client.fit(self.global_model_weights, self.id, {})
-        # test_metrics = self.flower_client.evaluate(res, {'name': f'Client {self.id}'})
+        res, metrics = self.flower_client.fit(loaded_weights, self.client_id, {})
+        test_metrics = self.flower_client.evaluate(res, {'name': f'Client {self.client_id}'})
 
-        # with open(self.save_results + "output.txt", "a") as f:
-        #     f.write(f"client {self.id}: "
-        #             f"data:{metrics['len_train']} "
-        #             f"train: {metrics['len_train']} "
-        #             f"train: {metrics['train_loss']} {metrics['train_acc']} "
-        #             f"val: {metrics['val_loss']} {metrics['val_acc']} "
-        #             f"test: {test_metrics['test_loss']} {test_metrics['test_acc']}\n")
- 
-        # return res, metrics, test_metrics
+        with open("output.txt", "a") as f:
+            f.write(f"client {self.client_id}: "
+                    f"data:{metrics['len_train']} "
+                    f"train: {metrics['len_train']} "
+                    f"train: {metrics['train_loss']} {metrics['train_acc']} "
+                    f"val: {metrics['val_loss']} {metrics['val_acc']} "
+                    f"test: {test_metrics['test_loss']} {test_metrics['test_acc']}\n")
+        
