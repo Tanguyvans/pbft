@@ -153,6 +153,10 @@ class PBFTNode:
             self.handle_view_sync(message)
         elif msg_type == 'node-join':
             self.handle_node_join(message)
+        elif msg_type == 'validation-result':
+            self.handle_validation_result(message)
+        elif msg_type == 'validation-failed':
+            self.handle_validation_failed(message)
         else:
             self.logger.warning(f"Unknown message type: {msg_type}")
     
@@ -187,7 +191,28 @@ class PBFTNode:
         operation = request.get('operation')
         request_id = request.get('request_id', '')
         view = request.get('view', 0)
+        validation_key = f"v{view}-s{sequence}"
+        
         self.logger.info(f"Executing operation for seq {sequence}, view {view}: {operation}")
+        
+        # Check if this operation has been validated
+        if hasattr(self, 'validated_operations') and validation_key in self.validated_operations:
+            if not self.validated_operations[validation_key]:
+                self.logger.warning(f"Operation for {validation_key} failed validation, skipping execution")
+                return "VALIDATION_FAILED"
+        
+        # For SET operations that need validation but haven't been validated yet
+        if operation.startswith('SET ') and (not hasattr(self, 'validated_operations') or validation_key not in self.validated_operations):
+            # Store for later execution after validation
+            if not hasattr(self, 'pending_validations'):
+                self.pending_validations = {}
+            
+            self.logger.info(f"Operation for {validation_key} waiting for validation")
+            self.pending_validations[validation_key] = request
+            
+            # Trigger validation check
+            self.execute_validation(sequence, request)
+            return "PENDING_VALIDATION"
         
         result = None
         state_changed = False
@@ -195,22 +220,16 @@ class PBFTNode:
         # Parse and execute the operation (simple key-value operations)
         try:
             parts = operation.split(' ', 2)  # Split only on the first two spaces
-
-            time.sleep(10)
             
             if parts[0] == 'SET' and len(parts) == 3:
                 key, value = parts[1], parts[2]
-                # Validate that value must have a length of exactly 3
-                if len(value) != 3:
-                    self.logger.warning(f"Invalid value length: {value}. Values must be exactly 3 characters.")
-                    result = f"ERROR: Values must be exactly 3 characters long. Got '{value}' with length {len(value)}."
-                else:
-                    with self.state_lock:
-                        self.state[key] = value
-                        self.logger.info(f"SET {key} = {value}")
-                        result = f"SET {key} = {value}"
-                        state_changed = True
-                        self.logger.info(f"State changed: {state_changed}")
+                
+                with self.state_lock:
+                    self.state[key] = value
+                    self.logger.info(f"SET {key} = {value}")
+                    result = f"SET {key} = {value}"
+                    state_changed = True
+                    self.logger.info(f"State changed: {state_changed}")
             
             elif parts[0] == 'GET' and len(parts) == 2:
                 key = parts[1]
@@ -680,3 +699,206 @@ class PBFTNode:
                 self.pbft.process_message(view_change_msg)
                 self.broadcast(view_change_msg)
                 self.logger.warning(f"Initiated view change to view {new_view} due to selective censorship")
+
+    def handle_validation_result(self, message: Dict):
+        """Handle validation results from other nodes"""
+        sender = message.get('sender')
+        sequence = message.get('sequence')
+        view = message.get('view')
+        is_valid = message.get('is_valid')
+        request_id = message.get('request_id')
+        
+        self.logger.info(f"Received validation result from node {sender} for seq {sequence}: {is_valid}")
+        
+        # Store validation result
+        if not hasattr(self, 'validation_results'):
+            self.validation_results = {}
+        
+        validation_key = f"v{view}-s{sequence}"
+        if validation_key not in self.validation_results:
+            self.validation_results[validation_key] = {}
+        
+        self.validation_results[validation_key][sender] = is_valid
+        
+        # Check if we have enough validations to determine consensus
+        total_nodes = len(self.validation_results[validation_key])
+        
+        # We need at least 2f+1 nodes to have reported their validation
+        required_responses = 2 * self.pbft.f + 1
+        
+        if total_nodes >= required_responses:
+            valid_count = sum(1 for v in self.validation_results[validation_key].values() if v)
+            total_count = len(self.validation_results[validation_key])
+            
+            self.logger.info(f"Validation consensus for {validation_key}: {valid_count}/{total_count} valid")
+            
+            # If majority of nodes validated it as valid, consider it valid for consensus
+            # For 4 nodes with f=1, we need at least 2f+1 = 3 nodes to validate it as valid
+            required_valid = required_responses  # Need 2f+1 nodes to validate as valid
+            
+            if valid_count >= required_valid:
+                self.logger.info(f"Validation consensus reached for {validation_key}: VALID")
+                
+                # Store the validation result for this operation
+                if not hasattr(self, 'validated_operations'):
+                    self.validated_operations = {}
+                self.validated_operations[validation_key] = True
+                
+                # Check if this operation is waiting for validation
+                if hasattr(self, 'pending_validations') and validation_key in self.pending_validations:
+                    request = self.pending_validations[validation_key]
+                    self.logger.info(f"Executing validated operation for {validation_key}")
+                    self.execute_operation(sequence, request)
+                    del self.pending_validations[validation_key]
+            
+            else:
+                self.logger.warning(f"Validation consensus reached for {validation_key}: INVALID")
+                
+                # Store the validation result for this operation
+                if not hasattr(self, 'validated_operations'):
+                    self.validated_operations = {}
+                self.validated_operations[validation_key] = False
+                
+                # Remove from pending validations if it exists
+                if hasattr(self, 'pending_validations') and validation_key in self.pending_validations:
+                    self.logger.warning(f"Removing invalid operation for {validation_key}")
+                    del self.pending_validations[validation_key]
+                
+                # If we're the primary, broadcast a validation-failed message
+                if self.pbft.is_primary_node():
+                    validation_failed_msg = {
+                        'type': 'validation-failed',
+                        'sender': self.node_id,
+                        'sequence': sequence,
+                        'view': view,
+                        'request_id': request_id
+                    }
+                    self.broadcast(validation_failed_msg)
+
+    def handle_validation_failed(self, message: Dict):
+        """Handle notification that an operation failed validation"""
+        sequence = message.get('sequence')
+        view = message.get('view')
+        request_id = message.get('request_id')
+        
+        validation_key = f"v{view}-s{sequence}"
+        self.logger.warning(f"Received validation-failed for {validation_key}")
+        
+        # Mark this operation as invalid
+        if not hasattr(self, 'validated_operations'):
+            self.validated_operations = {}
+        self.validated_operations[validation_key] = False
+        
+        # Remove from pending validations if it exists
+        if hasattr(self, 'pending_validations') and validation_key in self.pending_validations:
+            self.logger.warning(f"Removing invalid operation for {validation_key}")
+            del self.pending_validations[validation_key]
+        
+        # If we've already executed this operation, we need to roll it back
+        # This is a simplified approach - in a real system, you'd need a more robust rollback mechanism
+        operation = None
+        for block in self.blockchain.blocks:
+            if block.data.get('block_id') == validation_key:
+                operation = block.data.get('operation')
+                break
+        
+        if operation and operation.startswith('SET '):
+            parts = operation.split(' ', 2)
+            if len(parts) == 3:
+                key = parts[1]
+                with self.state_lock:
+                    if key in self.state:
+                        self.logger.warning(f"Rolling back invalid operation: {operation}")
+                        del self.state[key]
+
+    def execute_validation(self, sequence: int, request: Dict):
+        """Perform validation check for an operation"""
+        operation = request.get('operation', '')
+        request_id = request.get('request_id', '')
+        view = request.get('view', 0)
+        
+        self.logger.info(f"Validating operation for seq {sequence}, view {view}: {operation}")
+        
+        try:
+            parts = operation.split(' ', 2)  # Split only on the first two spaces
+            
+            # Add validation rule: value must be greater than node_id
+            if parts[0] == 'SET' and len(parts) == 3:
+                key, value = parts[1], parts[2]
+                
+                # Check if value is numeric and greater than node_id
+                try:
+                    value_int = int(value)
+                    is_valid = value_int > self.node_id
+                    self.logger.info(f"Validation check: value {value_int} > node_id {self.node_id} = {is_valid}")
+                    
+                    # Record validation result for consensus
+                    if not hasattr(self, 'validations'):
+                        self.validations = {}
+                    
+                    validation_key = f"v{view}-s{sequence}"
+                    self.validations[validation_key] = is_valid
+                    
+                    # Broadcast validation result to other nodes
+                    validation_msg = {
+                        'type': 'validation-result',
+                        'sender': self.node_id,
+                        'sequence': sequence,
+                        'view': view,
+                        'request_id': request_id,
+                        'is_valid': is_valid
+                    }
+                    self.broadcast(validation_msg)
+                    
+                    # Also process our own validation result
+                    self.handle_validation_result(validation_msg)
+                    
+                except ValueError:
+                    # Non-numeric value, use default validation
+                    is_valid = True
+                    self.logger.info(f"Non-numeric value {value}, using default validation")
+                    
+                    # Broadcast validation result
+                    validation_msg = {
+                        'type': 'validation-result',
+                        'sender': self.node_id,
+                        'sequence': sequence,
+                        'view': view,
+                        'request_id': request_id,
+                        'is_valid': is_valid
+                    }
+                    self.broadcast(validation_msg)
+                    
+                    # Also process our own validation result
+                    self.handle_validation_result(validation_msg)
+            else:
+                # Non-SET operations are always valid
+                is_valid = True
+                validation_msg = {
+                    'type': 'validation-result',
+                    'sender': self.node_id,
+                    'sequence': sequence,
+                    'view': view,
+                    'request_id': request_id,
+                    'is_valid': is_valid
+                }
+                self.broadcast(validation_msg)
+                
+                # Also process our own validation result
+                self.handle_validation_result(validation_msg)
+        except Exception as e:
+            self.logger.error(f"Error during validation: {e}")
+            # Default to valid in case of errors
+            is_valid = True
+            validation_msg = {
+                'type': 'validation-result',
+                'sender': self.node_id,
+                'sequence': sequence,
+                'view': view,
+                'request_id': request_id,
+                'is_valid': is_valid
+            }
+            self.broadcast(validation_msg)
+            
+            # Also process our own validation result
+            self.handle_validation_result(validation_msg)
