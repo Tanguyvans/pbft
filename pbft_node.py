@@ -246,7 +246,59 @@ class PBFTNode:
         
         # Parse and execute the operation
         try:
-            if operation == 'CREATE_GLOBAL_MODEL':
+            if operation.startswith('UPDATE_MODEL '):
+                # Format: UPDATE_MODEL model_path model_hash loss accuracy
+                parts = operation.split(' ', 4)
+                if len(parts) >= 5:
+                    model_path = parts[1]
+                    model_hash = parts[2]
+                    training_loss = float(parts[3])
+                    training_accuracy = float(parts[4])
+                    
+                    # Extract client ID from request
+                    client_id = request.get('client_id', 'unknown')
+                    
+                    # Verify the model file exists
+                    if not os.path.exists(model_path):
+                        self.logger.error(f"Model file not found: {model_path}")
+                        result = f"ERROR: Model file not found: {model_path}"
+                    else:
+                        # Verify the model hash
+                        with open(model_path, 'rb') as f:
+                            file_content = f.read()
+                            actual_hash = hashlib.sha256(file_content).hexdigest()
+                        
+                        if actual_hash != model_hash:
+                            self.logger.warning(f"Model hash verification failed!")
+                            self.logger.warning(f"Expected: {model_hash}")
+                            self.logger.warning(f"Actual: {actual_hash}")
+                            result = "ERROR: Model hash verification failed"
+                        else:
+                            # Create model metadata for blockchain
+                            model_update = {
+                                'type': 'model_update',
+                                'client_id': client_id,
+                                'timestamp': int(time.time()),
+                                'storage_path': model_path,
+                                'hash': model_hash,
+                                'training_loss': training_loss,
+                                'training_accuracy': training_accuracy
+                            }
+                            
+                            # Add to state
+                            with self.state_lock:
+                                # Store in a list of model updates
+                                if 'model_updates' not in self.state:
+                                    self.state['model_updates'] = []
+                                
+                                self.state['model_updates'].append(model_update)
+                                result = f"MODEL_UPDATED: {client_id}, accuracy: {training_accuracy:.4f}"
+                                state_changed = True
+                                self.logger.info(f"Added model update from client {client_id} to blockchain")
+                else:
+                    result = "ERROR: Invalid UPDATE_MODEL format"
+            
+            elif operation == 'CREATE_GLOBAL_MODEL':
                 self.logger.info("Creating initial global model")
                 
                 # Create models directory if it doesn't exist

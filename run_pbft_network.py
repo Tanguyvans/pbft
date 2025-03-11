@@ -211,12 +211,15 @@ def main():
     
     # Create clients
     clients = []
+
+    print("the size of the train set is: ", len(client_train_sets[0]))
+    print("the size of the test set is: ", len(client_train_sets))
     for i in range(num_clients):
         client = PBFTClient(
             client_id=f"client{i}", 
             nodes_config=nodes_config,
-            client_train_set=client_train_sets[i][:100],
-            client_test_set=client_test_sets[i][:100]
+            client_train_set=client_train_sets[i],
+            client_test_set=client_test_sets[i]
             )
         clients.append(client)
     
@@ -512,8 +515,7 @@ def main():
                     print("Could not find primary node")
             
             elif choice == '12':
-                for client in clients:
-                    client.train()
+                clients[0].train()
 
             else:
                 print("Invalid choice. Please enter a number between 1 and 11.")

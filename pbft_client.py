@@ -19,16 +19,9 @@ class PBFTClient:
         self.logger = logging.getLogger(f"Client-{self.client_id}")
         self.request_count = 0
 
-        # Limit dataset size
-        max_samples = 100  # Set your desired size here
+
         x_train, y_train = client_train_set
-        x_test, y_test = client_test_set
-        
-        # Limit to max_samples
-        x_train = x_train[:max_samples]
-        y_train = y_train[:max_samples]
-        x_test = x_test[:max_samples]
-        y_test = y_test[:max_samples]
+        x_test, y_test = client_test_set        
 
         x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.2, random_state=42,
                                                     stratify=None)
@@ -328,6 +321,9 @@ class PBFTClient:
                     'accuracy': correct / total
                 }, save_path)
                 
+                # Send the trained model back to the network
+                self.send_trained_model(save_path, running_loss, correct / total)
+                
                 return save_path, running_loss, correct / total
                 
             except Exception as e:
@@ -341,3 +337,53 @@ class PBFTClient:
             import traceback
             traceback.print_exc()
             return None, None, None
+
+    def send_trained_model(self, model_path, training_loss, training_accuracy):
+        """Send the trained model back to the PBFT network as a model update"""
+        self.logger.info(f"Sending trained model {model_path} back to the network as an update")
+        
+        # Create a unique request ID
+        timestamp = int(time.time() * 1000)
+        request_id = f"{self.client_id}:update_model:{timestamp}"
+        
+        # Calculate model hash
+        with open(model_path, 'rb') as f:
+            file_content = f.read()
+            model_hash = hashlib.sha256(file_content).hexdigest()
+        
+        # Create the request with UPDATE_MODEL operation instead of SUBMIT_TRAINED_MODEL
+        operation = f"UPDATE_MODEL {model_path} {model_hash} {training_loss} {training_accuracy}"
+        
+        request = {
+            'type': 'request',
+            'client_id': self.client_id,
+            'timestamp': timestamp,
+            'operation': operation,
+            'request_id': request_id,
+            'model_path': model_path,
+            'model_hash': model_hash,
+            'training_loss': training_loss,
+            'training_accuracy': training_accuracy
+        }
+        
+        # Send request to all nodes
+        success_count = 0
+        for node in self.nodes:
+            try:
+                self.logger.info(f"Sending model update to node {node['id']}")
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2.0)  # Longer timeout for sending model info
+                s.connect((node['host'], node['port']))
+                s.sendall(json.dumps(request).encode('utf-8'))
+                s.close()
+                success_count += 1
+            except Exception as e:
+                self.logger.error(f"Error sending model update to node {node['id']}: {e}")
+                continue
+        
+        if success_count > 0:
+            self.logger.info(f"Successfully sent model update to {success_count} nodes")
+            return True
+        else:
+            self.logger.error("Failed to send model update to any node")
+            return False
