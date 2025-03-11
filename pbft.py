@@ -246,7 +246,12 @@ class PBFT:
             
             # Notify the node that consensus has been reached
             self.logger.info(f"Consensus reached for request {request_id}, seq {seq}")
-            self.node.on_consensus_reached(seq, request)
+            
+            # Use the execute_consensus_operation method if available
+            if hasattr(self.node, 'execute_consensus_operation'):
+                self.node.execute_consensus_operation(seq, request)
+            else:
+                self.node.on_consensus_reached(seq, request)
 
     def handle_request(self, request: Dict):
         """Handle a client request"""
@@ -524,4 +529,4 @@ class PBFT:
         # Check if we need to change view due to new node count
         primary_id = self.view % self.total_nodes
         self._is_primary = (self.node_id == primary_id)
-        self.logger.info(f"Primary status after node update: {self._is_primary}") 
+        self.logger.info(f"Primary status after node update: {self._is_primary}")

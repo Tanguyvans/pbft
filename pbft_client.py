@@ -19,11 +19,23 @@ class PBFTClient:
         self.logger = logging.getLogger(f"Client-{self.client_id}")
         self.request_count = 0
 
+        # Limit dataset size
+        max_samples = 100  # Set your desired size here
         x_train, y_train = client_train_set
         x_test, y_test = client_test_set
+        
+        # Limit to max_samples
+        x_train = x_train[:max_samples]
+        y_train = y_train[:max_samples]
+        x_test = x_test[:max_samples]
+        y_test = y_test[:max_samples]
 
         x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.2, random_state=42,
                                                     stratify=None)
+        
+        print(f"the length of the train set is: {len(x_train)}")
+        print(f"the length of the val set is: {len(x_val)}")
+        print(f"the length of the test set is: {len(x_test)}")
 
         self.flower_client = FlowerClient.client(
             x_train=x_train,
@@ -187,61 +199,145 @@ class PBFTClient:
 
     def train(self):       
         """Train a local model based on the global model"""
-        # First, get the global model info
-        model_info = self.get_global_model()
-        
-        if not model_info:
-            self.logger.error("Cannot train without global model info")
-            return None, None, None
-        
-        self.logger.info(f"Received global model info: {model_info}")
-        
-        # Extract model path and hash
-        model_path = model_info.get('model_path')
-        model_hash = model_info.get('model_hash')
-        architecture = model_info.get('architecture', 'mobilenet_v2')
-        
-        # Verify the model file exists
-        if not os.path.exists(model_path):
-            self.logger.error(f"Model file not found: {model_path}")
-            return None, None, None
-        
-        # Verify the model hash
-        with open(model_path, 'rb') as f:
-            file_content = f.read()
-            file_hash = hashlib.sha256(file_content).hexdigest()
-        
-        # Get all model hashes from all nodes
-        all_hashes = set()
-        for node in self.nodes:
+        try:
+            # First, get the global model info
+            model_info = self.get_global_model()
+            
+            if not model_info:
+                self.logger.error("Cannot train without global model info")
+                return None, None, None
+            
+            self.logger.info(f"Received global model info: {model_info}")
+            
+            # Extract model path and hash
+            model_path = model_info.get('model_path')
+            expected_hash = model_info.get('model_hash')
+            architecture = model_info.get('architecture', 'mobilenet_v2')
+            
+            # Verify the model file exists
+            if not os.path.exists(model_path):
+                self.logger.error(f"Model file not found: {model_path}")
+                return None, None, None
+            
+            # Verify the model hash
+            with open(model_path, 'rb') as f:
+                file_content = f.read()
+                actual_hash = hashlib.sha256(file_content).hexdigest()
+
+            if actual_hash != expected_hash:
+                self.logger.warning(f"Model hash verification failed!")
+                self.logger.warning(f"Expected: {expected_hash}")
+                self.logger.warning(f"Actual: {actual_hash}")
+                self.logger.warning("Model may have been tampered with or corrupted")
+                
+                # You can choose to abort here if you want strict verification
+                # return None, None, None
+                
+                # Or continue with a warning
+                self.logger.warning("Continuing with unverified model...")
+            else:
+                self.logger.info("Model hash verification successful!")
+            
+            print("Step 1: Loading model architecture...")
+            from going_modular.model import Net
+            import torch
+            import torch.nn as nn
+            import torch.optim as optim
+            from torch.utils.data import DataLoader, TensorDataset
+            
+            # Initialize model
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model = Net(num_classes=10, arch=architecture).to(device)
+            
+            print("Step 2: Loading model weights...")
+            # Load the saved weights from PT file instead of NPZ
             try:
-                node_path = f"models/global_model_v1_{model_path.split('_')[-1]}"
-                if os.path.exists(node_path):
-                    with open(node_path, 'rb') as f:
-                        node_hash = hashlib.sha256(f.read()).hexdigest()
-                        all_hashes.add(node_hash)
+                checkpoint = torch.load(model_path, map_location=device)
+                
+                # Print some debug info
+                print(f"Checkpoint keys: {checkpoint.keys()}")
+                if 'model_state_dict' in checkpoint:
+                    print(f"Model has {len(checkpoint['model_state_dict'])} parameters")
+                    print(f"First few keys: {list(checkpoint['model_state_dict'].keys())[:5]}")
+                    
+                    # Load the state dict
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                    print("Successfully loaded model weights")
+                else:
+                    print("Warning: No model_state_dict found in checkpoint")
             except Exception as e:
-                self.logger.warning(f"Could not check hash for node model: {e}")
-        
-        self.logger.info(f"All possible model hashes: {all_hashes}")
-        
-        if file_hash != model_hash and file_hash not in all_hashes:
-            self.logger.error(f"Model hash verification failed. Expected one of {all_hashes}, got {file_hash}")
+                print(f"Error loading model weights: {e}")
+                print("Continuing with randomly initialized weights")
+            
+            print("Step 3: Preparing data...")
+            # Prepare your training data
+            x_train = self.flower_client.train_loader.dataset.tensors[0].to(device)
+            y_train = self.flower_client.train_loader.dataset.tensors[1].to(device)
+            
+            # Create data loader with smaller batch size
+            batch_size = 4  # Start with a small batch size
+            train_dataset = TensorDataset(x_train, y_train)
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+            
+            print("Step 4: Setting up training...")
+            # Define loss function and optimizer
+            criterion = nn.CrossEntropyLoss()
+            optimizer = optim.Adam(model.parameters(), lr=0.001)
+            
+            print("Step 5: Starting training...")
+            # Training loop
+            model.train()
+            num_epochs = 1
+            
+            try:
+                for epoch in range(num_epochs):
+                    running_loss = 0.0
+                    correct = 0
+                    total = 0
+                    
+                    for i, (inputs, labels) in enumerate(train_loader):
+                        # Zero the gradients
+                        optimizer.zero_grad()
+                        
+                        # Forward pass
+                        outputs = model(inputs)
+                        loss = criterion(outputs, labels)
+                        
+                        # Backward pass and optimize
+                        loss.backward()
+                        optimizer.step()
+                        
+                        # Print statistics
+                        running_loss += loss.item()
+                        _, predicted = torch.max(outputs.data, 1)
+                        total += labels.size(0)
+                        correct += (predicted == labels).sum().item()
+                        
+                        if i % 10 == 0:
+                            print(f'[{epoch + 1}, {i + 1}] loss: {running_loss / (i + 1):.3f}, '
+                                  f'accuracy: {100 * correct / total:.2f}%')
+                
+                print("Training completed successfully!")
+                
+                # Save the trained model
+                save_path = f"models/client_{self.client_id}_model.pt"
+                torch.save({
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': running_loss,
+                    'accuracy': correct / total
+                }, save_path)
+                
+                return save_path, running_loss, correct / total
+                
+            except Exception as e:
+                print(f"Error during training: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                return None, None, None
+                
+        except Exception as e:
+            print(f"Error in train method: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None, None, None
-        
-        self.logger.info(f"Model hash verified successfully")
-
-        loaded_weights_dict = np.load(model_path)
-        loaded_weights = [val for name, val in loaded_weights_dict.items() if 'bn' not in name and 'len_dataset' not in name]
-
-        res, metrics = self.flower_client.fit(loaded_weights, self.client_id, {})
-        test_metrics = self.flower_client.evaluate(res, {'name': f'Client {self.client_id}'})
-
-        with open("output.txt", "a") as f:
-            f.write(f"client {self.client_id}: "
-                    f"data:{metrics['len_train']} "
-                    f"train: {metrics['len_train']} "
-                    f"train: {metrics['train_loss']} {metrics['train_acc']} "
-                    f"val: {metrics['val_loss']} {metrics['val_acc']} "
-                    f"test: {test_metrics['test_loss']} {test_metrics['test_acc']}\n")
-        

@@ -103,7 +103,7 @@ class FlowerClient(fl.client.NumPyClient):
         results = train(node_id, self.model, self.train_loader, self.val_loader,
                         self.epochs, self.criterion, optimizer, scheduler, device=self.device,
                         dp=self.dp, delta=self.delta,
-                        max_physical_batch_size=int(self.batch_size / 4), privacy_engine=self.privacy_engine,
+                        max_physical_batch_size=10, privacy_engine=self.privacy_engine,
                         patience=self.patience, save_model=self.save_model + f"{node_id}_best_model.pth")
 
         self.model.load_state_dict(torch.load(self.save_model + f"{node_id}_best_model.pth"))

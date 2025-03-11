@@ -215,8 +215,8 @@ def main():
         client = PBFTClient(
             client_id=f"client{i}", 
             nodes_config=nodes_config,
-            client_train_set=client_train_sets[i],
-            client_test_set=client_test_sets[i]
+            client_train_set=client_train_sets[i][:100],
+            client_test_set=client_test_sets[i][:100]
             )
         clients.append(client)
     
