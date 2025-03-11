@@ -211,7 +211,7 @@ class PBFTNode:
             self.pending_validations[validation_key] = request
             
             # Trigger validation check
-            self.execute_validation(sequence, request)
+            self.validate_operation(sequence, request)
             return "PENDING_VALIDATION"
         
         result = None
@@ -721,59 +721,55 @@ class PBFTNode:
         self.validation_results[validation_key][sender] = is_valid
         
         # Check if we have enough validations to determine consensus
-        total_nodes = len(self.validation_results[validation_key])
+        valid_count = sum(1 for v in self.validation_results[validation_key].values() if v)
+        total_count = len(self.validation_results[validation_key])
         
-        # We need at least 2f+1 nodes to have reported their validation
-        required_responses = 2 * self.pbft.f + 1
+        self.logger.info(f"Validation consensus for {validation_key}: {valid_count}/{total_count} valid")
         
-        if total_nodes >= required_responses:
-            valid_count = sum(1 for v in self.validation_results[validation_key].values() if v)
-            total_count = len(self.validation_results[validation_key])
+        # We need at least 2f+1 nodes to validate it as valid
+        required_valid = 2 * self.pbft.f + 1
+        
+        # If we have enough valid votes, mark as valid
+        if valid_count >= required_valid:
+            self.logger.info(f"Validation consensus reached for {validation_key}: VALID")
             
-            self.logger.info(f"Validation consensus for {validation_key}: {valid_count}/{total_count} valid")
+            # Store the validation result for this operation
+            if not hasattr(self, 'validated_operations'):
+                self.validated_operations = {}
+            self.validated_operations[validation_key] = True
             
-            # If majority of nodes validated it as valid, consider it valid for consensus
-            # For 4 nodes with f=1, we need at least 2f+1 = 3 nodes to validate it as valid
-            required_valid = required_responses  # Need 2f+1 nodes to validate as valid
+            # Check if this operation is waiting for validation
+            if hasattr(self, 'pending_validations') and validation_key in self.pending_validations:
+                request = self.pending_validations[validation_key]
+                self.logger.info(f"Executing validated operation for {validation_key}")
+                self.execute_operation(sequence, request)
+                del self.pending_validations[validation_key]
+        
+        # Only mark as invalid if we've heard from all nodes or if it's mathematically impossible
+        # to reach the required valid count
+        elif (total_count == len(self.nodes)) or (valid_count + (len(self.nodes) - total_count) < required_valid):
+            self.logger.warning(f"Validation consensus reached for {validation_key}: INVALID")
             
-            if valid_count >= required_valid:
-                self.logger.info(f"Validation consensus reached for {validation_key}: VALID")
-                
-                # Store the validation result for this operation
-                if not hasattr(self, 'validated_operations'):
-                    self.validated_operations = {}
-                self.validated_operations[validation_key] = True
-                
-                # Check if this operation is waiting for validation
-                if hasattr(self, 'pending_validations') and validation_key in self.pending_validations:
-                    request = self.pending_validations[validation_key]
-                    self.logger.info(f"Executing validated operation for {validation_key}")
-                    self.execute_operation(sequence, request)
-                    del self.pending_validations[validation_key]
+            # Store the validation result for this operation
+            if not hasattr(self, 'validated_operations'):
+                self.validated_operations = {}
+            self.validated_operations[validation_key] = False
             
-            else:
-                self.logger.warning(f"Validation consensus reached for {validation_key}: INVALID")
-                
-                # Store the validation result for this operation
-                if not hasattr(self, 'validated_operations'):
-                    self.validated_operations = {}
-                self.validated_operations[validation_key] = False
-                
-                # Remove from pending validations if it exists
-                if hasattr(self, 'pending_validations') and validation_key in self.pending_validations:
-                    self.logger.warning(f"Removing invalid operation for {validation_key}")
-                    del self.pending_validations[validation_key]
-                
-                # If we're the primary, broadcast a validation-failed message
-                if self.pbft.is_primary_node():
-                    validation_failed_msg = {
-                        'type': 'validation-failed',
-                        'sender': self.node_id,
-                        'sequence': sequence,
-                        'view': view,
-                        'request_id': request_id
-                    }
-                    self.broadcast(validation_failed_msg)
+            # Remove from pending validations if it exists
+            if hasattr(self, 'pending_validations') and validation_key in self.pending_validations:
+                self.logger.warning(f"Removing invalid operation for {validation_key}")
+                del self.pending_validations[validation_key]
+            
+            # If we're the primary, broadcast a validation-failed message
+            if self.pbft.is_primary_node():
+                validation_failed_msg = {
+                    'type': 'validation-failed',
+                    'sender': self.node_id,
+                    'sequence': sequence,
+                    'view': view,
+                    'request_id': request_id
+                }
+                self.broadcast(validation_failed_msg)
 
     def handle_validation_failed(self, message: Dict):
         """Handle notification that an operation failed validation"""
@@ -811,7 +807,7 @@ class PBFTNode:
                         self.logger.warning(f"Rolling back invalid operation: {operation}")
                         del self.state[key]
 
-    def execute_validation(self, sequence: int, request: Dict):
+    def validate_operation(self, sequence: int, request: Dict):
         """Perform validation check for an operation"""
         operation = request.get('operation', '')
         request_id = request.get('request_id', '')
