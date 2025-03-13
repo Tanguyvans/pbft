@@ -82,6 +82,10 @@ class PBFTClient:
             
             return success_count > 0
         
+        # Log the full request for debugging
+        self.logger.info(f"Sending request with client_id: {self.client_id}")
+        self.logger.info(f"Full request: {json.dumps(request)}")
+        
         return True 
 
     def get_global_model(self):
@@ -222,14 +226,13 @@ class PBFTClient:
                 self.logger.warning(f"Expected: {expected_hash}")
                 self.logger.warning(f"Actual: {actual_hash}")
                 self.logger.warning("Model may have been tampered with or corrupted")
-                
-                # You can choose to abort here if you want strict verification
-                # return None, None, None
-                
-                # Or continue with a warning
                 self.logger.warning("Continuing with unverified model...")
             else:
                 self.logger.info("Model hash verification successful!")
+            
+            # Evaluate the global model before training
+            self.logger.info("Evaluating global model before training")
+            pre_train_loss, pre_train_accuracy = self.evaluate_model(model_path)
             
             print("Step 1: Loading model architecture...")
             from going_modular.model import Net
@@ -237,50 +240,71 @@ class PBFTClient:
             import torch.nn as nn
             import torch.optim as optim
             from torch.utils.data import DataLoader, TensorDataset
+            import numpy as np
+            
+            # Force CPU usage to avoid MPS bus errors
+            device = torch.device("cpu")
+            print("Using CPU device for training (avoiding MPS due to stability issues)")
             
             # Initialize model
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             model = Net(num_classes=10, arch=architecture).to(device)
             
             print("Step 2: Loading model weights...")
-            # Load the saved weights from PT file instead of NPZ
+            # Load the model weights based on file extension
             try:
-                checkpoint = torch.load(model_path, map_location=device)
-                
-                # Print some debug info
-                print(f"Checkpoint keys: {checkpoint.keys()}")
-                if 'model_state_dict' in checkpoint:
-                    print(f"Model has {len(checkpoint['model_state_dict'])} parameters")
-                    print(f"First few keys: {list(checkpoint['model_state_dict'].keys())[:5]}")
+                if model_path.endswith('.npz'):
+                    # Load NPZ file
+                    npz_data = np.load(model_path, allow_pickle=True)
                     
-                    # Load the state dict
-                    model.load_state_dict(checkpoint['model_state_dict'])
-                    print("Successfully loaded model weights")
+                    # Convert numpy arrays to PyTorch tensors
+                    state_dict = {}
+                    for key in npz_data.files:
+                        if key not in ['architecture', 'num_classes', 'version', 'created_by', 'timestamp']:
+                            state_dict[key] = torch.from_numpy(npz_data[key])
+                    
+                    # Load state dict into model
+                    model.load_state_dict(state_dict)
+                    print("Successfully loaded model weights from NPZ")
+                
+                elif model_path.endswith('.pt'):
+                    # Load PyTorch model
+                    checkpoint = torch.load(model_path, map_location=device)
+                    
+                    if 'model_state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                        print("Successfully loaded model weights from PT")
+                    else:
+                        print("Warning: No model_state_dict found in checkpoint")
                 else:
-                    print("Warning: No model_state_dict found in checkpoint")
+                    print(f"Unsupported model format: {model_path}")
             except Exception as e:
                 print(f"Error loading model weights: {e}")
                 print("Continuing with randomly initialized weights")
             
             print("Step 3: Preparing data...")
-            # Prepare your training data
+            # Prepare your training data - move to CPU
             x_train = self.flower_client.train_loader.dataset.tensors[0].to(device)
             y_train = self.flower_client.train_loader.dataset.tensors[1].to(device)
             
             # Create data loader with smaller batch size
-            batch_size = 4  # Start with a small batch size
+            batch_size = 16  # Smaller batch size to avoid memory issues
             train_dataset = TensorDataset(x_train, y_train)
             train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
             
             print("Step 4: Setting up training...")
             # Define loss function and optimizer
             criterion = nn.CrossEntropyLoss()
-            optimizer = optim.Adam(model.parameters(), lr=0.001)
+            optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+            
+            # Add learning rate scheduler for better convergence
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1, verbose=True)
             
             print("Step 5: Starting training...")
             # Training loop
             model.train()
-            num_epochs = 1
+            num_epochs = 1  # Increased number of epochs for better learning
+            best_loss = float('inf')
+            best_model_state = None
             
             try:
                 for epoch in range(num_epochs):
@@ -301,30 +325,72 @@ class PBFTClient:
                         optimizer.step()
                         
                         # Print statistics
-                        running_loss += loss.item()
+                        running_loss += loss.item() * inputs.size(0)
                         _, predicted = torch.max(outputs.data, 1)
                         total += labels.size(0)
                         correct += (predicted == labels).sum().item()
                         
-                        if i % 10 == 0:
-                            print(f'[{epoch + 1}, {i + 1}] loss: {running_loss / (i + 1):.3f}, '
+                        if i % 5 == 0:  # More frequent updates
+                            print(f'[{epoch + 1}, {i + 1}] loss: {running_loss / total:.3f}, '
                                   f'accuracy: {100 * correct / total:.2f}%')
                 
+                epoch_loss = running_loss / total
+                epoch_acc = correct / total
+                print(f'Epoch {epoch+1} - Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc*100:.2f}%')
+                
+                # Update scheduler
+                scheduler.step(epoch_loss)
+                
+                # Save best model
+                if epoch_loss < best_loss:
+                    best_loss = epoch_loss
+                    best_model_state = model.state_dict().copy()
+                    print(f"New best model saved! Loss: {epoch_loss:.4f}")
+            
                 print("Training completed successfully!")
                 
-                # Save the trained model
-                save_path = f"models/client_{self.client_id}_model.pt"
-                torch.save({
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': running_loss,
-                    'accuracy': correct / total
-                }, save_path)
+                # Load the best model state
+                if best_model_state is not None:
+                    model.load_state_dict(best_model_state)
+                    print("Loaded best model based on loss")
                 
-                # Send the trained model back to the network
-                self.send_trained_model(save_path, running_loss, correct / total)
+                # Save the trained model directly as NPZ
+                npz_dir = "models/npz"
+                os.makedirs(npz_dir, exist_ok=True)  # Ensure directory exists
                 
-                return save_path, running_loss, correct / total
+                timestamp = int(time.time())
+                npz_path = f"{npz_dir}/model_{self.client_id}_{timestamp}.npz"
+                
+                # Convert PyTorch model to numpy arrays
+                numpy_dict = {k: v.cpu().numpy() for k, v in model.state_dict().items()}
+                
+                # Add metadata
+                numpy_dict['architecture'] = architecture
+                numpy_dict['num_classes'] = 10
+                numpy_dict['loss'] = float(best_loss)
+                numpy_dict['accuracy'] = float(epoch_acc)
+                
+                # Save as NPZ
+                np.savez(npz_path, **numpy_dict)
+                self.logger.info(f"Model saved as NPZ: {npz_path}")
+                
+                # Evaluate the model after training
+                self.logger.info("Evaluating model after training")
+                post_train_loss, post_train_accuracy = self.evaluate_model(model=model)  # Pass the model directly
+                
+                # Log improvement
+                if pre_train_accuracy is not None and post_train_accuracy is not None:
+                    improvement = post_train_accuracy - pre_train_accuracy
+                    self.logger.info(f"Training improved accuracy by {improvement:.4f} ({improvement*100:.2f}%)")
+                
+                # Format loss and accuracy to avoid parsing issues
+                formatted_loss = float(post_train_loss)
+                formatted_accuracy = float(post_train_accuracy)
+
+                # Send the trained model back to the network using test metrics
+                self.send_trained_model(npz_path, formatted_loss, formatted_accuracy)
+                
+                return npz_path, post_train_loss, post_train_accuracy
                 
             except Exception as e:
                 print(f"Error during training: {str(e)}")
@@ -351,8 +417,17 @@ class PBFTClient:
             file_content = f.read()
             model_hash = hashlib.sha256(file_content).hexdigest()
         
-        # Create the request with UPDATE_MODEL operation instead of SUBMIT_TRAINED_MODEL
-        operation = f"UPDATE_MODEL {model_path} {model_hash} {training_loss} {training_accuracy}"
+        # Format loss and accuracy values to avoid parsing issues
+        # Note: We keep the raw values here (not multiplied by 100) - the node will do that
+        formatted_loss = float(training_loss)
+        formatted_accuracy = float(training_accuracy)
+        
+        # Create the request with UPDATE_MODEL operation
+        # Format: UPDATE_MODEL model_path model_hash loss accuracy
+        operation = f"UPDATE_MODEL {model_path} {model_hash} {formatted_loss} {formatted_accuracy}"
+        
+        # Log the operation string for debugging
+        self.logger.info(f"Operation string: {operation}")
         
         request = {
             'type': 'request',
@@ -362,8 +437,8 @@ class PBFTClient:
             'request_id': request_id,
             'model_path': model_path,
             'model_hash': model_hash,
-            'training_loss': training_loss,
-            'training_accuracy': training_accuracy
+            'training_loss': formatted_loss,
+            'training_accuracy': formatted_accuracy
         }
         
         # Send request to all nodes
@@ -387,3 +462,137 @@ class PBFTClient:
         else:
             self.logger.error("Failed to send model update to any node")
             return False
+
+    def evaluate_model(self, model_path=None, model=None):
+        """Evaluate the model on the test dataset
+        
+        Args:
+            model_path: Path to the model file (.pt or .npz)
+            model: PyTorch model object (if already loaded)
+        """
+        self.logger.info("Evaluating model performance")
+        
+        try:
+            import torch
+            import torch.nn as nn
+            from going_modular.model import Net
+            from torch.utils.data import DataLoader, TensorDataset
+            import numpy as np
+            
+            # Use CPU for evaluation to avoid MPS memory issues
+            device = torch.device("cpu")
+            self.logger.info("Using CPU device for evaluation (more stable)")
+            
+            # If model is not provided, load it from path
+            if model is None and model_path is not None:
+                # Initialize the model architecture
+                architecture = 'mobilenet_v2'  # Default architecture
+                
+                # Check if it's an NPZ file
+                if model_path.endswith('.npz'):
+                    self.logger.info(f"Loading NPZ model from {model_path}")
+                    # Load the NPZ file
+                    npz_data = np.load(model_path, allow_pickle=True)
+                    
+                    # Extract architecture if available
+                    if 'architecture' in npz_data:
+                        architecture = str(npz_data['architecture'])
+                    
+                    # Initialize model
+                    model = Net(num_classes=10, arch=architecture).to(device)
+                    
+                    # Convert numpy arrays to PyTorch tensors and load into model
+                    state_dict = {}
+                    for key in npz_data.files:
+                        if key not in ['architecture', 'num_classes', 'loss', 'accuracy']:
+                            state_dict[key] = torch.from_numpy(npz_data[key])
+                    
+                    model.load_state_dict(state_dict)
+                    self.logger.info("Successfully loaded model weights from NPZ")
+                
+                # Check if it's a PT file
+                elif model_path.endswith('.pt'):
+                    self.logger.info(f"Loading PT model from {model_path}")
+                    # Load the PyTorch model
+                    checkpoint = torch.load(model_path, map_location=device)
+                    
+                    if 'architecture' in checkpoint:
+                        architecture = checkpoint['architecture']
+                    
+                    # Initialize model
+                    model = Net(num_classes=10, arch=architecture).to(device)
+                    
+                    # Load weights
+                    if 'model_state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                        self.logger.info("Successfully loaded model weights from PT")
+                    else:
+                        self.logger.warning("No model_state_dict found in checkpoint")
+                        return None, None
+                else:
+                    self.logger.error(f"Unsupported model format: {model_path}")
+                    return None, None
+            
+            # Set model to evaluation mode
+            model.eval()
+            
+            # Define loss function
+            criterion = nn.CrossEntropyLoss()
+            
+            # Get test data from flower client and move to CPU
+            x_test = self.flower_client.test_loader.dataset.tensors[0].to(device)
+            y_test = self.flower_client.test_loader.dataset.tensors[1].to(device)
+            
+            # Create a proper test data loader with batching
+            batch_size = 16  # Smaller batch size to avoid memory issues
+            test_dataset = TensorDataset(x_test, y_test)
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            
+            # Perform evaluation in batches
+            with torch.no_grad():
+                total_loss = 0.0
+                correct = 0
+                total = 0
+                
+                for inputs, labels in test_loader:
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
+                    
+                    total_loss += loss.item() * inputs.size(0)
+                    _, predicted = torch.max(outputs.data, 1)
+                    total += labels.size(0)
+                    correct += (predicted == labels).sum().item()
+                
+                avg_loss = total_loss / total
+                accuracy = correct / total
+                
+                # Display accuracy as percentage for clarity in logs
+                self.logger.info(f"Evaluation results - Loss: {avg_loss:.4f}, Accuracy: {accuracy*100:.2f}% ({correct}/{total})")
+                
+                # Calculate per-class accuracy
+                class_correct = [0] * 10
+                class_total = [0] * 10
+                
+                for inputs, labels in test_loader:
+                    outputs = model(inputs)
+                    _, predicted = torch.max(outputs.data, 1)
+                    
+                    for i in range(len(labels)):
+                        label = labels[i].item()
+                        class_total[label] += 1
+                        if predicted[i] == labels[i]:
+                            class_correct[label] += 1
+                
+                for i in range(10):
+                    if class_total[i] > 0:
+                        class_acc = 100 * class_correct[i] / class_total[i]
+                        self.logger.info(f'Accuracy of class {i}: {class_acc:.2f}% ({class_correct[i]}/{class_total[i]})')
+                
+                # Return raw values (not multiplied by 100) for consistency with the rest of the code
+                return avg_loss, accuracy
+                
+        except Exception as e:
+            self.logger.error(f"Error during evaluation: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None, None

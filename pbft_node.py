@@ -274,6 +274,8 @@ class PBFTNode:
                             self.logger.warning(f"Actual: {actual_hash}")
                             result = "ERROR: Model hash verification failed"
                         else:
+                            # The model is already in NPZ format, no need to convert
+                            
                             # Create model metadata for blockchain
                             model_update = {
                                 'type': 'model_update',
@@ -282,7 +284,7 @@ class PBFTNode:
                                 'storage_path': model_path,
                                 'hash': model_hash,
                                 'training_loss': training_loss,
-                                'training_accuracy': training_accuracy
+                                'training_accuracy': training_accuracy * 100  # Multiply by 100 for clarity
                             }
                             
                             # Add to state
@@ -292,7 +294,7 @@ class PBFTNode:
                                     self.state['model_updates'] = []
                                 
                                 self.state['model_updates'].append(model_update)
-                                result = f"MODEL_UPDATED: {client_id}, accuracy: {training_accuracy:.4f}"
+                                result = f"MODEL_UPDATED: {client_id}, accuracy: {training_accuracy * 100:.2f}%"  # Show as percentage
                                 state_changed = True
                                 self.logger.info(f"Added model update from client {client_id} to blockchain")
                 else:
@@ -303,23 +305,32 @@ class PBFTNode:
                 
                 # Create models directory if it doesn't exist
                 models_dir = "models"
+                npz_dir = "models/npz"
                 if not os.path.exists(models_dir):
                     os.makedirs(models_dir)
+                if not os.path.exists(npz_dir):
+                    os.makedirs(npz_dir)
                 
-                # Create model file using PyTorch's format
+                # Create model file using NPZ format
                 timestamp = int(time.time())
-                model_filename = f"global_model_v1_{timestamp}.pt"
-                model_path = os.path.join(models_dir, model_filename)
+                model_filename = f"global_model_v1_{timestamp}.npz"
+                model_path = os.path.join(npz_dir, model_filename)
                 
                 # Get the model's state dict
                 state_dict = self.flower_client.model.state_dict()
                 
-                # Save the complete model state
-                torch.save({
-                    'model_state_dict': state_dict,
-                    'architecture': 'mobilenet_v2',
-                    'num_classes': 10
-                }, model_path)
+                # Convert PyTorch tensors to numpy arrays
+                numpy_dict = {k: v.cpu().numpy() for k, v in state_dict.items()}
+                
+                # Add metadata
+                numpy_dict['architecture'] = 'mobilenet_v2'
+                numpy_dict['num_classes'] = 10
+                numpy_dict['version'] = 1
+                numpy_dict['created_by'] = f"node-{self.node_id}"
+                numpy_dict['timestamp'] = timestamp
+                
+                # Save as NPZ
+                np.savez(model_path, **numpy_dict)
                 
                 # Calculate hash of the model file
                 model_hash = ""
