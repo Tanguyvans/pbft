@@ -322,14 +322,7 @@ class PBFTNode:
                 # Convert PyTorch tensors to numpy arrays
                 numpy_dict = {k: v.cpu().numpy() for k, v in state_dict.items()}
                 
-                # Add metadata
-                numpy_dict['architecture'] = 'mobilenet_v2'
-                numpy_dict['num_classes'] = 10
-                numpy_dict['version'] = 1
-                numpy_dict['created_by'] = f"node-{self.node_id}"
-                numpy_dict['timestamp'] = timestamp
-                
-                # Save as NPZ
+                # Save the model weights
                 np.savez(model_path, **numpy_dict)
                 
                 # Calculate hash of the model file
@@ -339,7 +332,7 @@ class PBFTNode:
                 
                 self.logger.info(f"Global model saved to {model_path} with hash {model_hash}")
                 
-                # Create model metadata for blockchain
+                # Create model metadata for blockchain (separate from the model file)
                 model_data = {
                     'type': 'initial_model',
                     'version': 1,

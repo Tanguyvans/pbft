@@ -259,22 +259,22 @@ class PBFTClient:
                     # Convert numpy arrays to PyTorch tensors
                     state_dict = {}
                     for key in npz_data.files:
-                        if key not in ['architecture', 'num_classes', 'version', 'created_by', 'timestamp']:
-                            state_dict[key] = torch.from_numpy(npz_data[key])
+                        # Skip any non-tensor metadata
+                        try:
+                            tensor = torch.from_numpy(npz_data[key])
+                            state_dict[key] = tensor
+                        except TypeError:
+                            print(f"Skipping non-tensor key in NPZ file: {key}")
                     
-                    # Load state dict into model
-                    model.load_state_dict(state_dict)
-                    print("Successfully loaded model weights from NPZ")
-                
-                elif model_path.endswith('.pt'):
-                    # Load PyTorch model
-                    checkpoint = torch.load(model_path, map_location=device)
-                    
-                    if 'model_state_dict' in checkpoint:
-                        model.load_state_dict(checkpoint['model_state_dict'])
-                        print("Successfully loaded model weights from PT")
+                    # Check if we have a valid state dict
+                    if state_dict:
+                        try:
+                            model.load_state_dict(state_dict)
+                            print("Successfully loaded model weights from NPZ")
+                        except Exception as e:
+                            print(f"Error loading state dict: {e}")
                     else:
-                        print("Warning: No model_state_dict found in checkpoint")
+                        print("No valid tensors found in NPZ file")
                 else:
                     print(f"Unsupported model format: {model_path}")
             except Exception as e:
@@ -361,18 +361,23 @@ class PBFTClient:
                 timestamp = int(time.time())
                 npz_path = f"{npz_dir}/model_{self.client_id}_{timestamp}.npz"
                 
-                # Convert PyTorch model to numpy arrays
+                # Convert PyTorch model to numpy arrays - only save the tensors
                 numpy_dict = {k: v.cpu().numpy() for k, v in model.state_dict().items()}
                 
-                # Add metadata
-                numpy_dict['architecture'] = architecture
-                numpy_dict['num_classes'] = 10
-                numpy_dict['loss'] = float(best_loss)
-                numpy_dict['accuracy'] = float(epoch_acc)
-                
-                # Save as NPZ
+                # Save as NPZ - don't include metadata in the file itself
                 np.savez(npz_path, **numpy_dict)
                 self.logger.info(f"Model saved as NPZ: {npz_path}")
+                
+                # Store metadata separately if needed
+                model_metadata = {
+                    'architecture': architecture,
+                    'num_classes': 10,
+                    'loss': float(best_loss),
+                    'accuracy': float(epoch_acc),
+                    'client_id': self.client_id,
+                    'timestamp': timestamp
+                }
+                # You could save this metadata to a separate JSON file if needed
                 
                 # Evaluate the model after training
                 self.logger.info("Evaluating model after training")
@@ -494,21 +499,30 @@ class PBFTClient:
                     # Load the NPZ file
                     npz_data = np.load(model_path, allow_pickle=True)
                     
-                    # Extract architecture if available
-                    if 'architecture' in npz_data:
-                        architecture = str(npz_data['architecture'])
-                    
                     # Initialize model
                     model = Net(num_classes=10, arch=architecture).to(device)
                     
                     # Convert numpy arrays to PyTorch tensors and load into model
                     state_dict = {}
                     for key in npz_data.files:
-                        if key not in ['architecture', 'num_classes', 'loss', 'accuracy']:
-                            state_dict[key] = torch.from_numpy(npz_data[key])
+                        # Skip any non-tensor metadata that might be in the file
+                        try:
+                            tensor = torch.from_numpy(npz_data[key])
+                            state_dict[key] = tensor
+                        except TypeError as e:
+                            self.logger.warning(f"Skipping non-tensor key in NPZ file: {key} - {e}")
                     
-                    model.load_state_dict(state_dict)
-                    self.logger.info("Successfully loaded model weights from NPZ")
+                    # Check if we have a valid state dict
+                    if state_dict:
+                        try:
+                            model.load_state_dict(state_dict)
+                            self.logger.info("Successfully loaded model weights from NPZ")
+                        except Exception as e:
+                            self.logger.error(f"Error loading state dict: {e}")
+                            return None, None
+                    else:
+                        self.logger.error("No valid tensors found in NPZ file")
+                        return None, None
                 
                 # Check if it's a PT file
                 elif model_path.endswith('.pt'):
