@@ -6,7 +6,7 @@ settings = {
     "batch_size": 32,
     "n_epochs": 15,
     "number_of_nodes": 4,
-    "number_of_clients": 500,
+    "number_of_clients": 200,
     "min_number_of_clients_in_cluster": 3,
 
     "check_usefulness": True,

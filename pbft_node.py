@@ -98,6 +98,13 @@ class PBFTNode:
             
             # Schedule the creation of the initial model after a longer delay
             threading.Timer(3.0, delayed_initial_model).start()
+        
+        # Model aggregation parameters
+        self.update_threshold = 3  # Number of updates before aggregation
+        
+        # Track model updates
+        self.pending_updates = []  # List of validated updates since last aggregation
+        self.global_model_version = 1  # Current global model version
     
     def start_server(self):
         """Accept incoming connections and handle them in separate threads"""
@@ -241,6 +248,25 @@ class PBFTNode:
             self.validate_operation(sequence, request)
             return "PENDING_VALIDATION"
         
+        # Check if this is a duplicate global model update
+        if operation.startswith('UPDATE_GLOBAL_MODEL '):
+            parts = operation.split(' ', 3)
+            if len(parts) >= 4:
+                version = int(parts[3])
+                
+                # Check if we've already processed this version
+                with self.state_lock:
+                    try:
+                        current_model_info = json.loads(self.state.get('global_model', '{}'))
+                        current_version = current_model_info.get('version', 0)
+                        
+                        # If we've already processed this version or a newer one, skip
+                        if current_version >= version:
+                            self.logger.warning(f"Skipping duplicate global model update for version {version}, current version is {current_version}")
+                            return f"SKIPPED_DUPLICATE: Global model v{version} already processed"
+                    except:
+                        pass
+        
         result = None
         state_changed = False
         
@@ -297,6 +323,30 @@ class PBFTNode:
                                 result = f"MODEL_UPDATED: {client_id}, accuracy: {training_accuracy * 100:.2f}%"  # Show as percentage
                                 state_changed = True
                                 self.logger.info(f"Added model update from client {client_id} to blockchain")
+                                
+                                # Add to pending updates for aggregation
+                                update_info = {
+                                    'client_id': client_id,
+                                    'model_path': model_path,
+                                    'model_hash': model_hash,
+                                    'training_loss': training_loss,
+                                    'training_accuracy': training_accuracy,
+                                    'timestamp': int(time.time())
+                                }
+                                
+                                self.pending_updates.append(update_info)
+                                self.logger.info(f"Added model update to pending list. Current count: {len(self.pending_updates)}/{self.update_threshold}")
+                                
+                                # Check if we should trigger aggregation
+                                if len(self.pending_updates) >= self.update_threshold:
+                                    if self.pbft.is_primary_node():
+                                        self.logger.info(f"Threshold reached! Triggering model aggregation with {len(self.pending_updates)} updates")
+                                        # Use threading to avoid blocking the execution queue
+                                        aggregation_thread = threading.Thread(target=self.aggregate_models)
+                                        aggregation_thread.daemon = True
+                                        aggregation_thread.start()
+                                    else:
+                                        self.logger.info(f"Threshold reached but this is not the primary node. Waiting for primary to initiate aggregation.")
                 else:
                     result = "ERROR: Invalid UPDATE_MODEL format"
             
@@ -388,6 +438,65 @@ class PBFTNode:
                             self.logger.info(f"State changed: {state_changed}")
                         else:
                             result = f"DELETE {key} = KEY_NOT_FOUND"
+            elif operation.startswith('UPDATE_GLOBAL_MODEL '):
+                # Format: UPDATE_GLOBAL_MODEL model_path model_hash version
+                parts = operation.split(' ', 3)
+                if len(parts) >= 4:
+                    model_path = parts[1]
+                    model_hash = parts[2]
+                    version = int(parts[3])
+                    
+                    # Verify the model file exists
+                    if not os.path.exists(model_path):
+                        self.logger.error(f"Global model file not found: {model_path}")
+                        result = f"ERROR: Global model file not found: {model_path}"
+                    else:
+                        # Verify the model hash
+                        with open(model_path, 'rb') as f:
+                            file_content = f.read()
+                            actual_hash = hashlib.sha256(file_content).hexdigest()
+                        
+                        if actual_hash != model_hash:
+                            self.logger.warning(f"Global model hash verification failed!")
+                            self.logger.warning(f"Expected: {model_hash}")
+                            self.logger.warning(f"Actual: {actual_hash}")
+                            result = "ERROR: Global model hash verification failed"
+                        else:
+                            # Get the full model data from the request
+                            model_data = request.get('model_data', {})
+                            if not model_data:
+                                # If model_data not in request, create basic metadata
+                                model_data = {
+                                    'type': 'aggregated_model',
+                                    'version': version,
+                                    'created_by': request.get('client_id', f"node-{self.node_id}"),
+                                    'timestamp': int(time.time()),
+                                    'storage_path': model_path,
+                                    'hash': model_hash,
+                                    'architecture': 'mobilenet_v2',
+                                    'num_classes': 10
+                                }
+                            
+                            # Update state with new global model
+                            with self.state_lock:
+                                old_model_info = None
+                                try:
+                                    old_model_info = json.loads(self.state.get('global_model', '{}'))
+                                except:
+                                    pass
+                                
+                                self.state['global_model'] = json.dumps(model_data)
+                                
+                                # Update local tracking
+                                self.global_model_version = version
+                                self.pending_updates = []  # Clear pending updates
+                                
+                                result = f"GLOBAL_MODEL_UPDATED: version {version}"
+                                state_changed = True
+                                
+                                # Log the update
+                                old_version = old_model_info.get('version', 0) if old_model_info else 0
+                                self.logger.info(f"Updated global model from v{old_version} to v{version}")
             else:
                 self.logger.warning(f"Unknown operation format: {operation}")
                 result = f"UNKNOWN_OPERATION: {operation}"
@@ -475,8 +584,38 @@ class PBFTNode:
                     self.logger.info(f"Sequence {seq} in view {view} already executed, skipping")
                     continue
                 
-                # Execute the operation
+                # For global model updates, check if we've already processed this version
                 operation = request.get('operation', '')
+                if operation.startswith('UPDATE_GLOBAL_MODEL '):
+                    parts = operation.split(' ', 3)
+                    if len(parts) >= 4:
+                        version = int(parts[3])
+                        
+                        # Check if we've already processed this version
+                        with self.state_lock:
+                            try:
+                                current_model_info = json.loads(self.state.get('global_model', '{}'))
+                                current_version = current_model_info.get('version', 0)
+                                
+                                # If we've already processed this version or a newer one, skip
+                                if current_version >= version:
+                                    self.logger.warning(f"Skipping duplicate global model update for version {version}, current version is {current_version}")
+                                    
+                                    # Mark as executed to avoid reprocessing
+                                    self.last_executed_seq = seq
+                                    if request_id:
+                                        self.executed_requests.add(request_id)
+                                    
+                                    # Track executed sequences per view
+                                    if not hasattr(self, 'executed_view_seqs'):
+                                        self.executed_view_seqs = set()
+                                    self.executed_view_seqs.add(view_seq_key)
+                                    
+                                    continue
+                            except:
+                                pass
+                
+                # Execute the operation
                 result = self.execute_operation(seq, {
                     'operation': operation,
                     'request_id': request_id,
@@ -1321,3 +1460,200 @@ class PBFTNode:
                     if key in self.state:
                         self.logger.warning(f"Rolling back invalid operation: {operation}")
                         del self.state[key]
+
+    def aggregate_models(self):
+        """Aggregate model updates into a new global model using simple averaging"""
+        if not self.pbft.is_primary_node():
+            self.logger.warning("Only primary node can perform aggregation")
+            return
+        
+        self.logger.info(f"Starting model aggregation with {len(self.pending_updates)} updates")
+        
+        try:
+            # Get current global model info
+            global_model_info = None
+            try:
+                global_model_info = json.loads(self.state['global_model'])
+            except (KeyError, json.JSONDecodeError):
+                self.logger.error("Failed to get global model info, cannot aggregate")
+                return
+            
+            # Get the current global model path
+            global_model_path = global_model_info.get('storage_path')
+            if not global_model_path or not os.path.exists(global_model_path):
+                self.logger.error(f"Global model file not found: {global_model_path}")
+                return
+            
+            # Load the global model
+            import numpy as np
+            
+            # Create directories if needed
+            models_dir = "models"
+            npz_dir = "models/npz"
+            os.makedirs(models_dir, exist_ok=True)
+            os.makedirs(npz_dir, exist_ok=True)
+            
+            # Load the current global model
+            self.logger.info(f"Loading global model from {global_model_path}")
+            global_npz = np.load(global_model_path, allow_pickle=True)
+            global_weights = {}
+            
+            for key in global_npz.files:
+                try:
+                    global_weights[key] = global_npz[key]
+                except TypeError:
+                    self.logger.warning(f"Skipping non-tensor key in global model: {key}")
+            
+            # Load all update models
+            self.logger.info(f"Loading {len(self.pending_updates)} update models")
+            update_weights = []
+            
+            for update in self.pending_updates:
+                model_path = update['model_path']
+                if not os.path.exists(model_path):
+                    self.logger.warning(f"Update model file not found: {model_path}")
+                    continue
+                
+                # Load the update model
+                self.logger.info(f"Loading update model from {model_path}")
+                update_npz = np.load(model_path, allow_pickle=True)
+                model_weights = {}
+                
+                for key in update_npz.files:
+                    try:
+                        model_weights[key] = update_npz[key]
+                    except TypeError:
+                        self.logger.warning(f"Skipping non-tensor key in update model: {key}")
+                
+                if model_weights:
+                    update_weights.append(model_weights)
+            
+            if not update_weights:
+                self.logger.warning("No valid update models found, skipping aggregation")
+                return
+            
+            # Simple averaging of models (equal weights)
+            self.logger.info(f"Performing simple averaging of {len(update_weights)} models")
+            aggregated_weights = {}
+            
+            # Initialize aggregated weights with zeros of the same shape and dtype as global weights
+            for key in global_weights:
+                # Convert to float64 to avoid casting issues
+                aggregated_weights[key] = np.zeros_like(global_weights[key], dtype=np.float64)
+            
+            # Average all update models
+            for model_weights in update_weights:
+                for key in aggregated_weights:
+                    if key in model_weights:
+                        # Convert to float64 before adding to avoid casting issues
+                        weight_array = model_weights[key].astype(np.float64)
+                        aggregated_weights[key] += weight_array / len(update_weights)
+            
+            # Convert back to original dtype if needed
+            for key in aggregated_weights:
+                if key in global_weights:
+                    # Convert back to the original dtype of the global model
+                    original_dtype = global_weights[key].dtype
+                    if original_dtype != np.float64:
+                        self.logger.info(f"Converting {key} back to original dtype: {original_dtype}")
+                        # Use astype with 'same_kind' casting to avoid precision loss
+                        try:
+                            aggregated_weights[key] = aggregated_weights[key].astype(original_dtype)
+                        except TypeError:
+                            # If casting fails, keep as float64
+                            self.logger.warning(f"Could not cast {key} back to {original_dtype}, keeping as float64")
+            
+            # Create a new global model file
+            new_version = self.global_model_version + 1
+            timestamp = int(time.time())
+            new_model_filename = f"global_model_v{new_version}_{timestamp}.npz"
+            new_model_path = os.path.join(npz_dir, new_model_filename)
+            
+            # Save the aggregated model
+            self.logger.info(f"Saving new global model to {new_model_path}")
+            np.savez(new_model_path, **aggregated_weights)
+            
+            # Calculate hash of the new model file
+            with open(new_model_path, 'rb') as f:
+                new_model_hash = hashlib.sha256(f.read()).hexdigest()
+            
+            # Create model metadata
+            new_model_data = {
+                'type': 'aggregated_model',
+                'version': new_version,
+                'created_by': f"node-{self.node_id}",
+                'timestamp': timestamp,
+                'storage_path': new_model_path,
+                'hash': new_model_hash,
+                'architecture': global_model_info.get('architecture', 'mobilenet_v2'),
+                'num_classes': global_model_info.get('num_classes', 10),
+                'aggregated_from': len(update_weights),
+                'parent_version': global_model_info.get('version', 1)
+            }
+            
+            # Create a consensus request to update all nodes with the new global model
+            self.logger.info("Initiating consensus for the new global model")
+            self.create_new_global_model_consensus(new_model_data)
+            
+            # Update local state
+            self.global_model_version = new_version
+            # Clear pending updates after successful aggregation
+            self.pending_updates = []
+            
+            self.logger.info(f"Model aggregation completed: created global model v{new_version}")
+            
+        except Exception as e:
+            self.logger.error(f"Error during model aggregation: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def create_new_global_model_consensus(self, model_data):
+        """Create a consensus request for the new global model"""
+        if not self.pbft.is_primary_node():
+            self.logger.warning("Only primary node can initiate global model consensus")
+            return
+        
+        # Create a unique request ID that includes the version
+        version = model_data['version']
+        timestamp = model_data['timestamp']
+        request_id = f"global_model_v{version}_{timestamp}"
+        
+        # Check if we've already initiated consensus for this version
+        if hasattr(self, 'global_model_consensus_versions') and version in self.global_model_consensus_versions:
+            self.logger.warning(f"Already initiated consensus for global model v{version}, skipping")
+            return
+        
+        # Track this version to avoid duplicates
+        if not hasattr(self, 'global_model_consensus_versions'):
+            self.global_model_consensus_versions = set()
+        self.global_model_consensus_versions.add(version)
+        
+        # Create operation string
+        operation = f"UPDATE_GLOBAL_MODEL {model_data['storage_path']} {model_data['hash']} {model_data['version']}"
+        
+        # Create request
+        request = {
+            'type': 'request',
+            'client_id': f"node-{self.node_id}",
+            'timestamp': timestamp,
+            'operation': operation,
+            'request_id': request_id,
+            'model_data': model_data  # Include full model data
+        }
+        
+        # Store request in PBFT module
+        digest = hashlib.sha256(f"{request_id}:{operation}".encode()).hexdigest()
+        self.pbft.store_request(request_id, {
+            'client_id': f"node-{self.node_id}",
+            'timestamp': timestamp,
+            'operation': operation,
+            'digest': digest
+        })
+        
+        # Broadcast request to all nodes
+        self.broadcast(request)
+        
+        # Start consensus
+        self.pbft.start_consensus(request_id)
+        
+        self.logger.info(f"Initiated consensus for new global model v{model_data['version']}")

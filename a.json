@@ -1,0 +1,310 @@
+{
+    "length": 7,
+    "blocks": [
+        {
+            "index": 0,
+            "timestamp": 1000000000,
+            "data": {
+                "message": "Genesis Block"
+            },
+            "model_type": "genesis",
+            "storage_reference": "",
+            "calculated_hash": "",
+            "participants": [
+                "system"
+            ],
+            "previous_hash": "",
+            "nonce": 0,
+            "current_hash": "c6f5b192928503b5792eb86314e01fdadc880c641ddc49a0adde5778e1c9ce7b"
+        },
+        {
+            "index": 1,
+            "timestamp": 1741876260.7673512,
+            "data": {
+                "operation": "CREATE_GLOBAL_MODEL",
+                "sequence": 1,
+                "view": 0,
+                "block_id": "v0-s1",
+                "request_id": "",
+                "result": "GLOBAL_MODEL_CREATED",
+                "state_snapshot": {
+                    "global_model": "{\"type\": \"initial_model\", \"version\": 1, \"created_by\": \"node-0\", \"timestamp\": 1741876260, \"storage_path\": \"models/npz/global_model_v1_1741876260.npz\", \"hash\": \"1c3239a565d53d472154666a8a787f727d954f682b88c06780512c4392e4c893\", \"architecture\": \"mobilenet_v2\", \"num_classes\": 10}"
+                }
+            },
+            "model_type": "key-value-operation",
+            "storage_reference": "op-v0-s1",
+            "calculated_hash": "7cb2006b469b6a71326c6316e20cdfc099bc353a7e04e78b38240417eeb18453",
+            "participants": [
+                "0"
+            ],
+            "previous_hash": "c6f5b192928503b5792eb86314e01fdadc880c641ddc49a0adde5778e1c9ce7b",
+            "nonce": 191,
+            "current_hash": "005da929a67aceec5c5760c7f0e51fa71fd659f18191856c2422ac851c4c2bc2"
+        },
+        {
+            "index": 2,
+            "timestamp": 1741876363.436406,
+            "data": {
+                "operation": "UPDATE_MODEL models/npz/model_client0_1741876362.npz 9f9dea8f3602e0608b2bf8c9a0953a2b67053ed30111319c0f47510e712596bd 2.18628511428833 0.18",
+                "sequence": 2,
+                "view": 0,
+                "block_id": "v0-s2",
+                "request_id": "",
+                "result": "MODEL_UPDATED: unknown, accuracy: 18.00%",
+                "state_snapshot": {
+                    "global_model": "{\"type\": \"initial_model\", \"version\": 1, \"created_by\": \"node-0\", \"timestamp\": 1741876260, \"storage_path\": \"models/npz/global_model_v1_1741876260.npz\", \"hash\": \"1c3239a565d53d472154666a8a787f727d954f682b88c06780512c4392e4c893\", \"architecture\": \"mobilenet_v2\", \"num_classes\": 10}",
+                    "model_updates": [
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876363,
+                            "storage_path": "models/npz/model_client0_1741876362.npz",
+                            "hash": "9f9dea8f3602e0608b2bf8c9a0953a2b67053ed30111319c0f47510e712596bd",
+                            "training_loss": 2.18628511428833,
+                            "training_accuracy": 18.0
+                        },
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876462,
+                            "storage_path": "models/npz/model_client0_1741876461.npz",
+                            "hash": "e43ea8fde1a4d0cb27660d27120b401cb7faffe49793be2076e4eba6b7838110",
+                            "training_loss": 2.29746636390686,
+                            "training_accuracy": 16.0
+                        },
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876593,
+                            "storage_path": "models/npz/model_client0_1741876592.npz",
+                            "hash": "05269012d22146daf0eba436787fd3aaa0d94523af1fd975545c74cfb7594a45",
+                            "training_loss": 2.2250989055633545,
+                            "training_accuracy": 14.000000000000002
+                        }
+                    ]
+                }
+            },
+            "model_type": "key-value-operation",
+            "storage_reference": "op-v0-s2",
+            "calculated_hash": "7dd8a00afcb527e8ca1c4a965ab84e47c9fc3c3602a3085cffd1edef2cb4d724",
+            "participants": [
+                "0"
+            ],
+            "previous_hash": "005da929a67aceec5c5760c7f0e51fa71fd659f18191856c2422ac851c4c2bc2",
+            "nonce": 543,
+            "current_hash": "22af893fc7f199ab13c5e9ca362cd2eb73ac94bca173730f08c2c55b414aa72d"
+        },
+        {
+            "index": 3,
+            "timestamp": 1741876462.393992,
+            "data": {
+                "operation": "UPDATE_MODEL models/npz/model_client0_1741876461.npz e43ea8fde1a4d0cb27660d27120b401cb7faffe49793be2076e4eba6b7838110 2.29746636390686 0.16",
+                "sequence": 3,
+                "view": 0,
+                "block_id": "v0-s3",
+                "request_id": "",
+                "result": "MODEL_UPDATED: unknown, accuracy: 16.00%",
+                "state_snapshot": {
+                    "global_model": "{\"type\": \"initial_model\", \"version\": 1, \"created_by\": \"node-0\", \"timestamp\": 1741876260, \"storage_path\": \"models/npz/global_model_v1_1741876260.npz\", \"hash\": \"1c3239a565d53d472154666a8a787f727d954f682b88c06780512c4392e4c893\", \"architecture\": \"mobilenet_v2\", \"num_classes\": 10}",
+                    "model_updates": [
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876363,
+                            "storage_path": "models/npz/model_client0_1741876362.npz",
+                            "hash": "9f9dea8f3602e0608b2bf8c9a0953a2b67053ed30111319c0f47510e712596bd",
+                            "training_loss": 2.18628511428833,
+                            "training_accuracy": 18.0
+                        },
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876462,
+                            "storage_path": "models/npz/model_client0_1741876461.npz",
+                            "hash": "e43ea8fde1a4d0cb27660d27120b401cb7faffe49793be2076e4eba6b7838110",
+                            "training_loss": 2.29746636390686,
+                            "training_accuracy": 16.0
+                        },
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876593,
+                            "storage_path": "models/npz/model_client0_1741876592.npz",
+                            "hash": "05269012d22146daf0eba436787fd3aaa0d94523af1fd975545c74cfb7594a45",
+                            "training_loss": 2.2250989055633545,
+                            "training_accuracy": 14.000000000000002
+                        }
+                    ]
+                }
+            },
+            "model_type": "key-value-operation",
+            "storage_reference": "op-v0-s3",
+            "calculated_hash": "03bd958d70d770ce5c2f0d30b2513c18d7e90bdb98c8c9f003344bf30602cf68",
+            "participants": [
+                "0"
+            ],
+            "previous_hash": "a8084d1149ba565d787254f173ab9b1454fae7500758382f4090828805adedd0",
+            "nonce": 474,
+            "current_hash": "b95b1c7bce187b31e83e9bf219be5ac01ff28765f8e2f9a78a4adad4d653e513"
+        },
+        {
+            "index": 4,
+            "timestamp": 1741876593.12973,
+            "data": {
+                "operation": "UPDATE_MODEL models/npz/model_client0_1741876592.npz 05269012d22146daf0eba436787fd3aaa0d94523af1fd975545c74cfb7594a45 2.2250989055633545 0.14",
+                "sequence": 4,
+                "view": 0,
+                "block_id": "v0-s4",
+                "request_id": "",
+                "result": "MODEL_UPDATED: unknown, accuracy: 14.00%",
+                "state_snapshot": {
+                    "global_model": "{\"type\": \"initial_model\", \"version\": 1, \"created_by\": \"node-0\", \"timestamp\": 1741876260, \"storage_path\": \"models/npz/global_model_v1_1741876260.npz\", \"hash\": \"1c3239a565d53d472154666a8a787f727d954f682b88c06780512c4392e4c893\", \"architecture\": \"mobilenet_v2\", \"num_classes\": 10}",
+                    "model_updates": [
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876363,
+                            "storage_path": "models/npz/model_client0_1741876362.npz",
+                            "hash": "9f9dea8f3602e0608b2bf8c9a0953a2b67053ed30111319c0f47510e712596bd",
+                            "training_loss": 2.18628511428833,
+                            "training_accuracy": 18.0
+                        },
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876462,
+                            "storage_path": "models/npz/model_client0_1741876461.npz",
+                            "hash": "e43ea8fde1a4d0cb27660d27120b401cb7faffe49793be2076e4eba6b7838110",
+                            "training_loss": 2.29746636390686,
+                            "training_accuracy": 16.0
+                        },
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876593,
+                            "storage_path": "models/npz/model_client0_1741876592.npz",
+                            "hash": "05269012d22146daf0eba436787fd3aaa0d94523af1fd975545c74cfb7594a45",
+                            "training_loss": 2.2250989055633545,
+                            "training_accuracy": 14.000000000000002
+                        }
+                    ]
+                }
+            },
+            "model_type": "key-value-operation",
+            "storage_reference": "op-v0-s4",
+            "calculated_hash": "2c7b0587972a564bdc1325c3e970e6b7c8646eadf534480f621eba017fbc58f9",
+            "participants": [
+                "0"
+            ],
+            "previous_hash": "b95b1c7bce187b31e83e9bf219be5ac01ff28765f8e2f9a78a4adad4d653e513",
+            "nonce": 355,
+            "current_hash": "00c494dcf356d49b662c8111c85c559ac860fefc0a173d44d481737f187263a9"
+        },
+        {
+            "index": 5,
+            "timestamp": 1741876593.316267,
+            "data": {
+                "operation": "UPDATE_GLOBAL_MODEL models/npz/global_model_v2_1741876593.npz 1bce1d18240742773701969db9f1e76e2a79e1eef39fd798fbb1b4a4767bdbf9 2",
+                "sequence": 5,
+                "view": 0,
+                "block_id": "v0-s5",
+                "request_id": "",
+                "result": "GLOBAL_MODEL_UPDATED: version 2",
+                "state_snapshot": {
+                    "global_model": "{\"type\": \"aggregated_model\", \"version\": 2, \"created_by\": \"node-0\", \"timestamp\": 1741876593, \"storage_path\": \"models/npz/global_model_v2_1741876593.npz\", \"hash\": \"1bce1d18240742773701969db9f1e76e2a79e1eef39fd798fbb1b4a4767bdbf9\", \"architecture\": \"mobilenet_v2\", \"num_classes\": 10}",
+                    "model_updates": [
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876363,
+                            "storage_path": "models/npz/model_client0_1741876362.npz",
+                            "hash": "9f9dea8f3602e0608b2bf8c9a0953a2b67053ed30111319c0f47510e712596bd",
+                            "training_loss": 2.18628511428833,
+                            "training_accuracy": 18.0
+                        },
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876462,
+                            "storage_path": "models/npz/model_client0_1741876461.npz",
+                            "hash": "e43ea8fde1a4d0cb27660d27120b401cb7faffe49793be2076e4eba6b7838110",
+                            "training_loss": 2.29746636390686,
+                            "training_accuracy": 16.0
+                        },
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876593,
+                            "storage_path": "models/npz/model_client0_1741876592.npz",
+                            "hash": "05269012d22146daf0eba436787fd3aaa0d94523af1fd975545c74cfb7594a45",
+                            "training_loss": 2.2250989055633545,
+                            "training_accuracy": 14.000000000000002
+                        }
+                    ]
+                }
+            },
+            "model_type": "key-value-operation",
+            "storage_reference": "op-v0-s5",
+            "calculated_hash": "d9347989d587b683f2dcd12bcee06ace33e2d9674a51d3d8a594785304970f8f",
+            "participants": [
+                "0"
+            ],
+            "previous_hash": "00c494dcf356d49b662c8111c85c559ac860fefc0a173d44d481737f187263a9",
+            "nonce": 205,
+            "current_hash": "003cfc485b421ea9f4ee5fe82349364101570b590b3da8167a75b9c367444da8"
+        },
+        {
+            "index": 6,
+            "timestamp": 1741876593.327965,
+            "data": {
+                "operation": "UPDATE_GLOBAL_MODEL models/npz/global_model_v2_1741876593.npz 1bce1d18240742773701969db9f1e76e2a79e1eef39fd798fbb1b4a4767bdbf9 2",
+                "sequence": 6,
+                "view": 0,
+                "block_id": "v0-s6",
+                "request_id": "",
+                "result": "GLOBAL_MODEL_UPDATED: version 2",
+                "state_snapshot": {
+                    "global_model": "{\"type\": \"aggregated_model\", \"version\": 2, \"created_by\": \"node-0\", \"timestamp\": 1741876593, \"storage_path\": \"models/npz/global_model_v2_1741876593.npz\", \"hash\": \"1bce1d18240742773701969db9f1e76e2a79e1eef39fd798fbb1b4a4767bdbf9\", \"architecture\": \"mobilenet_v2\", \"num_classes\": 10}",
+                    "model_updates": [
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876363,
+                            "storage_path": "models/npz/model_client0_1741876362.npz",
+                            "hash": "9f9dea8f3602e0608b2bf8c9a0953a2b67053ed30111319c0f47510e712596bd",
+                            "training_loss": 2.18628511428833,
+                            "training_accuracy": 18.0
+                        },
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876462,
+                            "storage_path": "models/npz/model_client0_1741876461.npz",
+                            "hash": "e43ea8fde1a4d0cb27660d27120b401cb7faffe49793be2076e4eba6b7838110",
+                            "training_loss": 2.29746636390686,
+                            "training_accuracy": 16.0
+                        },
+                        {
+                            "type": "model_update",
+                            "client_id": "unknown",
+                            "timestamp": 1741876593,
+                            "storage_path": "models/npz/model_client0_1741876592.npz",
+                            "hash": "05269012d22146daf0eba436787fd3aaa0d94523af1fd975545c74cfb7594a45",
+                            "training_loss": 2.2250989055633545,
+                            "training_accuracy": 14.000000000000002
+                        }
+                    ]
+                }
+            },
+            "model_type": "key-value-operation",
+            "storage_reference": "op-v0-s6",
+            "calculated_hash": "d9347989d587b683f2dcd12bcee06ace33e2d9674a51d3d8a594785304970f8f",
+            "participants": [
+                "0"
+            ],
+            "previous_hash": "003cfc485b421ea9f4ee5fe82349364101570b590b3da8167a75b9c367444da8",
+            "nonce": 352,
+            "current_hash": "004a35563a88c6d8c2a7bd29af0793f52112f9029888baee6e18e21c622e1dfa"
+        }
+    ]
+}
