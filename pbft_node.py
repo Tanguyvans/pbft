@@ -215,7 +215,7 @@ class PBFTNode:
     
     def execute_operation(self, sequence: int, request: Dict):
         """Execute the operation and update the state"""
-        operation = request.get('operation')
+        operation = request.get('operation', '')
         request_id = request.get('request_id', '')
         view = request.get('view', 0)
         validation_key = f"v{view}-s{sequence}"
@@ -228,8 +228,8 @@ class PBFTNode:
                 self.logger.warning(f"Operation for {validation_key} failed validation, skipping execution")
                 return "VALIDATION_FAILED"
         
-        # For SET operations that need validation but haven't been validated yet
-        if operation.startswith('SET ') and (not hasattr(self, 'validated_operations') or validation_key not in self.validated_operations):
+        # For operations that need validation but haven't been validated yet
+        if (operation.startswith('UPDATE_MODEL ') or operation.startswith('SET ')) and (not hasattr(self, 'validated_operations') or validation_key not in self.validated_operations):
             # Store for later execution after validation
             if not hasattr(self, 'pending_validations'):
                 self.pending_validations = {}
@@ -972,11 +972,143 @@ class PBFTNode:
         is_valid = True
         
         try:
-            parts = operation.split(' ', 2)  # Split only on the first two spaces
+            # Check if this is a model update operation
+            if operation.startswith('UPDATE_MODEL '):
+                # Format: UPDATE_MODEL model_path model_hash loss accuracy
+                parts = operation.split(' ', 4)
+                if len(parts) >= 5:
+                    model_path = parts[1]
+                    model_hash = parts[2]
+                    update_loss = float(parts[3])
+                    update_accuracy = float(parts[4])
+                    
+                    # Extract client ID from request
+                    client_id = request.get('client_id', 'unknown')
+                    
+                    self.logger.info(f"Validating model update from {client_id}")
+                    self.logger.info(f"Update model metrics - Loss: {update_loss:.4f}, Accuracy: {update_accuracy*100:.2f}%")
+                    
+                    # Get the global model info
+                    global_model_info = None
+                    with self.state_lock:
+                        if 'global_model' in self.state:
+                            try:
+                                global_model_info = json.loads(self.state['global_model'])
+                            except:
+                                self.logger.error("Failed to parse global model info from state")
+                    
+                    if global_model_info:
+                        # Evaluate the global model on our test set if we haven't already
+                        if not hasattr(self, 'global_model_metrics'):
+                            self.global_model_metrics = {}
+                        
+                        global_model_path = global_model_info.get('storage_path')
+                        
+                        # If we haven't evaluated this global model yet, do it now
+                        if global_model_path not in self.global_model_metrics:
+                            self.logger.info(f"Evaluating global model {global_model_path} for validation")
+                            
+                            # Load and evaluate the global model
+                            try:
+                                import torch
+                                import torch.nn as nn
+                                import numpy as np
+                                from going_modular.model import Net
+                                
+                                # Load the model
+                                device = torch.device("cpu")
+                                
+                                # Initialize model architecture
+                                architecture = global_model_info.get('architecture', 'mobilenet_v2')
+                                model = Net(num_classes=10, arch=architecture).to(device)
+                                
+                                # Load weights based on file extension
+                                if global_model_path.endswith('.npz'):
+                                    # Load NPZ file
+                                    npz_data = np.load(global_model_path, allow_pickle=True)
+                                    
+                                    # Convert numpy arrays to PyTorch tensors
+                                    state_dict = {}
+                                    for key in npz_data.files:
+                                        # Skip any non-tensor metadata
+                                        try:
+                                            tensor = torch.from_numpy(npz_data[key])
+                                            state_dict[key] = tensor
+                                        except TypeError:
+                                            self.logger.warning(f"Skipping non-tensor key in NPZ file: {key}")
+                                    
+                                    # Load state dict
+                                    model.load_state_dict(state_dict)
+                                
+                                # Evaluate the model
+                                model.eval()
+                                criterion = nn.CrossEntropyLoss()
+                                
+                                # Get test data from flower client
+                                x_test = self.flower_client.x_test
+                                y_test = self.flower_client.y_test
+                                
+                                # Convert to tensors if needed
+                                if not isinstance(x_test, torch.Tensor):
+                                    x_test = torch.tensor(x_test)
+                                if not isinstance(y_test, torch.Tensor):
+                                    y_test = torch.tensor(y_test)
+                                
+                                # Move to device
+                                x_test = x_test.to(device)
+                                y_test = y_test.to(device)
+                                
+                                # Evaluate
+                                with torch.no_grad():
+                                    outputs = model(x_test)
+                                    loss = criterion(outputs, y_test)
+                                    _, predicted = torch.max(outputs.data, 1)
+                                    total = y_test.size(0)
+                                    correct = (predicted == y_test).sum().item()
+                                    
+                                    global_loss = loss.item()
+                                    global_accuracy = correct / total
+                                
+                                # Store metrics
+                                self.global_model_metrics[global_model_path] = {
+                                    'loss': global_loss,
+                                    'accuracy': global_accuracy
+                                }
+                                
+                                self.logger.info(f"Global model metrics - Loss: {global_loss:.4f}, Accuracy: {global_accuracy*100:.2f}%")
+                            
+                            except Exception as e:
+                                self.logger.error(f"Error evaluating global model: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                # Default to accepting the update if we can't evaluate the global model
+                                self.global_model_metrics[global_model_path] = {
+                                    'loss': float('inf'),
+                                    'accuracy': 0.0
+                                }
+                        
+                        # Compare update model with global model
+                        global_metrics = self.global_model_metrics[global_model_path]
+                        global_loss = global_metrics['loss']
+                        global_accuracy = global_metrics['accuracy']
+                        
+                        self.logger.info(f"Comparing models:")
+                        self.logger.info(f"  Global model: Loss={global_loss:.4f}, Accuracy={global_accuracy*100:.2f}%")
+                        self.logger.info(f"  Update model: Loss={update_loss:.4f}, Accuracy={update_accuracy*100:.2f}%")
+                        
+                        # Validation rule: update model must have lower loss or higher accuracy
+                        is_valid = (update_loss < global_loss) or (update_accuracy > global_accuracy)
+                        
+                        if is_valid:
+                            self.logger.info(f"✅ Model update from {client_id} VALIDATED - Improves on global model")
+                        else:
+                            self.logger.warning(f"❌ Model update from {client_id} REJECTED - Does not improve on global model")
+                    else:
+                        self.logger.warning("No global model info found, defaulting to accepting the update")
             
-            # Only SET operations need special validation
-            if parts[0] == 'SET' and len(parts) == 3:
-                key, value = parts[1], parts[2]
+            # For SET operations, keep the existing validation logic
+            elif operation.startswith('SET ') and len(operation.split(' ', 2)) == 3:
+                key, value = operation.split(' ', 2)[1:]
                 
                 # Check if value is numeric
                 try:
@@ -989,7 +1121,7 @@ class PBFTNode:
                     self.logger.info(f"Non-numeric value '{value}', using default validation (valid)")
             else:
                 # Non-SET operations are always valid
-                self.logger.info(f"Operation type '{parts[0]}' doesn't require validation")
+                self.logger.info(f"Operation type '{operation.split(' ')[0]}' doesn't require validation")
         except Exception as e:
             self.logger.error(f"Error during validation: {e}")
             # Default to valid in case of errors
@@ -1016,6 +1148,35 @@ class PBFTNode:
         
         # Also process our own validation result
         self.handle_validation_result(validation_msg)
+
+        # Log validation votes for model updates
+        if operation.startswith('UPDATE_MODEL '):
+            # Log validation votes for model updates
+            parts = operation.split(' ', 4)
+            if len(parts) >= 5:
+                model_path = parts[1]
+                client_id = request.get('client_id', 'unknown')
+                
+                # Create a validation log entry
+                if not hasattr(self, 'model_validation_log'):
+                    self.model_validation_log = {}
+                
+                if validation_key not in self.model_validation_log:
+                    self.model_validation_log[validation_key] = {
+                        'client_id': client_id,
+                        'model_path': model_path,
+                        'votes': {},
+                        'result': None
+                    }
+                
+                # Add this node's vote
+                self.model_validation_log[validation_key]['votes'][self.node_id] = is_valid
+                
+                # Log the current voting status
+                votes_for = sum(1 for v in self.model_validation_log[validation_key]['votes'].values() if v)
+                votes_against = len(self.model_validation_log[validation_key]['votes']) - votes_for
+                
+                self.logger.info(f"Model validation votes for {client_id}: {votes_for} FOR, {votes_against} AGAINST")
 
     def handle_validation_result(self, message: Dict):
         """Handle validation results from other nodes"""
@@ -1046,20 +1207,45 @@ class PBFTNode:
         
         self.logger.info(f"Validation status for {validation_key}: {valid_count}/{total_count} valid, need {required_valid}")
         
+        # Track votes for model updates in the log
+        if hasattr(self, 'model_validation_log') and validation_key in self.model_validation_log:
+            self.model_validation_log[validation_key]['votes'][sender] = is_valid
+            
+            # Update vote counts in log
+            votes_for = sum(1 for v in self.model_validation_log[validation_key]['votes'].values() if v)
+            votes_against = len(self.model_validation_log[validation_key]['votes']) - votes_for
+            
+            self.logger.info(f"Updated model validation votes: {votes_for} FOR, {votes_against} AGAINST")
+        
         # Case 1: We have enough valid votes to mark as valid
         if valid_count >= required_valid:
             self.logger.info(f"✅ Validation consensus reached for {validation_key}: VALID ({valid_count} ≥ {required_valid})")
             self._mark_operation_as_valid(validation_key, sequence, request_id)
+            
+            # Update model validation log
+            if hasattr(self, 'model_validation_log') and validation_key in self.model_validation_log:
+                self.model_validation_log[validation_key]['result'] = True
+                self.logger.info(f"Model update ACCEPTED by consensus")
         
         # Case 2: It's mathematically impossible to reach enough valid votes
         elif valid_count + (len(self.nodes) - total_count) < required_valid:
             self.logger.warning(f"❌ Validation consensus reached for {validation_key}: INVALID (max possible: {valid_count + (len(self.nodes) - total_count)} < {required_valid})")
             self._mark_operation_as_invalid(validation_key, sequence, view, request_id)
+            
+            # Update model validation log
+            if hasattr(self, 'model_validation_log') and validation_key in self.model_validation_log:
+                self.model_validation_log[validation_key]['result'] = False
+                self.logger.warning(f"Model update REJECTED by consensus")
         
         # Case 3: We've heard from all nodes and don't have enough valid votes
         elif total_count == len(self.nodes) and valid_count < required_valid:
             self.logger.warning(f"❌ Validation consensus reached for {validation_key}: INVALID (all nodes reported, {valid_count} < {required_valid})")
             self._mark_operation_as_invalid(validation_key, sequence, view, request_id)
+            
+            # Update model validation log
+            if hasattr(self, 'model_validation_log') and validation_key in self.model_validation_log:
+                self.model_validation_log[validation_key]['result'] = False
+                self.logger.warning(f"Model update REJECTED by consensus")
         
         # Otherwise: Still waiting for more votes
 
