@@ -184,6 +184,12 @@ class PBFTClient:
             
             if model_info:
                 self.logger.info(f"Successfully received model info: {model_info}")
+                # Store the model info for future reference
+                self.global_model_info = model_info
+                
+                # Log the version information
+                version = model_info.get('version', 1)
+                self.logger.info(f"Global model version: v{version}")
             else:
                 self.logger.error("Did not receive valid model info from any node")
             
@@ -210,6 +216,9 @@ class PBFTClient:
             model_path = model_info.get('model_path')
             expected_hash = model_info.get('model_hash')
             architecture = model_info.get('architecture', 'mobilenet_v2')
+            
+            # Get the global model version - this is important for our versioning
+            global_model_version = model_info.get('version', 1)
             
             # Verify the model file exists
             if not os.path.exists(model_path):
@@ -354,19 +363,20 @@ class PBFTClient:
                     model.load_state_dict(best_model_state)
                     print("Loaded best model based on loss")
                 
-                # Save the trained model directly as NPZ
+                # Save the trained model directly as NPZ with version in filename
                 npz_dir = "models/npz"
                 os.makedirs(npz_dir, exist_ok=True)  # Ensure directory exists
                 
                 timestamp = int(time.time())
-                npz_path = f"{npz_dir}/model_{self.client_id}_{timestamp}.npz"
+                # Include the global model version in the filename
+                npz_path = f"{npz_dir}/model_{self.client_id}_v{global_model_version}_{timestamp}.npz"
                 
                 # Convert PyTorch model to numpy arrays - only save the tensors
                 numpy_dict = {k: v.cpu().numpy() for k, v in model.state_dict().items()}
                 
                 # Save as NPZ - don't include metadata in the file itself
                 np.savez(npz_path, **numpy_dict)
-                self.logger.info(f"Model saved as NPZ: {npz_path}")
+                self.logger.info(f"Model saved as NPZ: {npz_path} (based on global model v{global_model_version})")
                 
                 # Store metadata separately if needed
                 model_metadata = {
@@ -375,7 +385,8 @@ class PBFTClient:
                     'loss': float(best_loss),
                     'accuracy': float(epoch_acc),
                     'client_id': self.client_id,
-                    'timestamp': timestamp
+                    'timestamp': timestamp,
+                    'global_model_version': global_model_version  # Track which global model this is based on
                 }
                 # You could save this metadata to a separate JSON file if needed
                 
@@ -393,7 +404,8 @@ class PBFTClient:
                 formatted_accuracy = float(post_train_accuracy)
 
                 # Send the trained model back to the network using test metrics
-                self.send_trained_model(npz_path, formatted_loss, formatted_accuracy)
+                # Include the global model version when sending the model
+                self.send_trained_model(npz_path, formatted_loss, formatted_accuracy, global_model_version)
                 
                 return npz_path, post_train_loss, post_train_accuracy
                 
@@ -409,13 +421,20 @@ class PBFTClient:
             traceback.print_exc()
             return None, None, None
 
-    def send_trained_model(self, model_path, training_loss, training_accuracy):
-        """Send the trained model back to the PBFT network as a model update"""
-        self.logger.info(f"Sending trained model {model_path} back to the network as an update")
+    def send_trained_model(self, model_path, training_loss, training_accuracy, global_model_version=1):
+        """Send the trained model back to the PBFT network as a model update
+        
+        Args:
+            model_path: Path to the trained model file
+            training_loss: Loss value from training
+            training_accuracy: Accuracy value from training
+            global_model_version: Version of the global model this update is based on
+        """
+        self.logger.info(f"Sending trained model {model_path} back to the network as an update (based on global model v{global_model_version})")
         
         # Create a unique request ID
         timestamp = int(time.time() * 1000)
-        request_id = f"{self.client_id}:update_model:{timestamp}"
+        request_id = f"{self.client_id}:update_model_v{global_model_version}:{timestamp}"
         
         # Calculate model hash
         with open(model_path, 'rb') as f:
@@ -423,13 +442,12 @@ class PBFTClient:
             model_hash = hashlib.sha256(file_content).hexdigest()
         
         # Format loss and accuracy values to avoid parsing issues
-        # Note: We keep the raw values here (not multiplied by 100) - the node will do that
         formatted_loss = float(training_loss)
         formatted_accuracy = float(training_accuracy)
         
         # Create the request with UPDATE_MODEL operation
-        # Format: UPDATE_MODEL model_path model_hash loss accuracy
-        operation = f"UPDATE_MODEL {model_path} {model_hash} {formatted_loss} {formatted_accuracy}"
+        # Format: UPDATE_MODEL model_path model_hash loss accuracy v{version}
+        operation = f"UPDATE_MODEL {model_path} {model_hash} {formatted_loss} {formatted_accuracy} v{global_model_version}"
         
         # Log the operation string for debugging
         self.logger.info(f"Operation string: {operation}")
@@ -443,14 +461,15 @@ class PBFTClient:
             'model_path': model_path,
             'model_hash': model_hash,
             'training_loss': formatted_loss,
-            'training_accuracy': formatted_accuracy
+            'training_accuracy': formatted_accuracy,
+            'global_model_version': global_model_version  # Include version information
         }
         
         # Send request to all nodes
         success_count = 0
         for node in self.nodes:
             try:
-                self.logger.info(f"Sending model update to node {node['id']}")
+                self.logger.info(f"Sending model update v{global_model_version} to node {node['id']}")
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(2.0)  # Longer timeout for sending model info
                 s.connect((node['host'], node['port']))
@@ -462,10 +481,10 @@ class PBFTClient:
                 continue
         
         if success_count > 0:
-            self.logger.info(f"Successfully sent model update to {success_count} nodes")
+            self.logger.info(f"Successfully sent model update v{global_model_version} to {success_count} nodes")
             return True
         else:
-            self.logger.error("Failed to send model update to any node")
+            self.logger.error(f"Failed to send model update v{global_model_version} to any node")
             return False
 
     def evaluate_model(self, model_path=None, model=None):

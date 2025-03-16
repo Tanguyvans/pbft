@@ -204,6 +204,16 @@ class PBFTNode:
         operation = message.get('operation')
         request_id = f"{client_id}:{timestamp}"
         
+        # Check if this is a model update and extract version information
+        if operation.startswith('UPDATE_MODEL '):
+            # Get the global model version this update is based on
+            global_model_version = message.get('global_model_version', 1)
+            
+            # Add version to the operation string if not already there
+            if ' v' not in operation:
+                operation = f"{operation} v{global_model_version}"
+                message['operation'] = operation
+        
         # Calculate request digest
         request_data = f"{client_id}:{timestamp}:{operation}"
         digest = hashlib.sha256(request_data.encode()).hexdigest()
@@ -273,13 +283,20 @@ class PBFTNode:
         # Parse and execute the operation
         try:
             if operation.startswith('UPDATE_MODEL '):
-                # Format: UPDATE_MODEL model_path model_hash loss accuracy
-                parts = operation.split(' ', 4)
+                # Format: UPDATE_MODEL model_path model_hash loss accuracy [vX]
+                parts = operation.split(' ')
                 if len(parts) >= 5:
                     model_path = parts[1]
                     model_hash = parts[2]
                     training_loss = float(parts[3])
                     training_accuracy = float(parts[4])
+                    
+                    # Extract version information if present
+                    update_version = 1  # Default version
+                    for part in parts[5:]:
+                        if part.startswith('v') and part[1:].isdigit():
+                            update_version = int(part[1:])
+                            break
                     
                     # Extract client ID from request
                     client_id = request.get('client_id', 'unknown')
@@ -310,7 +327,9 @@ class PBFTNode:
                                 'storage_path': model_path,
                                 'hash': model_hash,
                                 'training_loss': training_loss,
-                                'training_accuracy': training_accuracy * 100  # Multiply by 100 for clarity
+                                'training_accuracy': training_accuracy * 100,  # Multiply by 100 for clarity
+                                'version': update_version,  # Add version information
+                                'based_on_global': self.global_model_version  # Track which global model this is based on
                             }
                             
                             # Add to state
@@ -320,33 +339,47 @@ class PBFTNode:
                                     self.state['model_updates'] = []
                                 
                                 self.state['model_updates'].append(model_update)
-                                result = f"MODEL_UPDATED: {client_id}, accuracy: {training_accuracy * 100:.2f}%"  # Show as percentage
+                                result = f"MODEL_UPDATED: {client_id}, accuracy: {training_accuracy * 100:.2f}%, version: v{update_version}"
                                 state_changed = True
-                                self.logger.info(f"Added model update from client {client_id} to blockchain")
+                                self.logger.info(f"Added model update v{update_version} from client {client_id} to blockchain")
                                 
-                                # Add to pending updates for aggregation
+                                # Add to pending updates for aggregation, grouped by version
                                 update_info = {
                                     'client_id': client_id,
                                     'model_path': model_path,
                                     'model_hash': model_hash,
                                     'training_loss': training_loss,
                                     'training_accuracy': training_accuracy,
-                                    'timestamp': int(time.time())
+                                    'timestamp': int(time.time()),
+                                    'version': update_version
                                 }
                                 
-                                self.pending_updates.append(update_info)
-                                self.logger.info(f"Added model update to pending list. Current count: {len(self.pending_updates)}/{self.update_threshold}")
+                                # Group updates by version
+                                if not hasattr(self, 'pending_updates_by_version'):
+                                    self.pending_updates_by_version = {}
                                 
-                                # Check if we should trigger aggregation
-                                if len(self.pending_updates) >= self.update_threshold:
+                                if update_version not in self.pending_updates_by_version:
+                                    self.pending_updates_by_version[update_version] = []
+                                
+                                self.pending_updates_by_version[update_version].append(update_info)
+                                
+                                # Also add to the regular pending updates list for backward compatibility
+                                self.pending_updates.append(update_info)
+                                
+                                # Log the update count for this version
+                                version_updates = len(self.pending_updates_by_version[update_version])
+                                self.logger.info(f"Added model update to pending list for version v{update_version}. Current count: {version_updates}/{self.update_threshold}")
+                                
+                                # Check if we should trigger aggregation for this version
+                                if version_updates >= self.update_threshold:
                                     if self.pbft.is_primary_node():
-                                        self.logger.info(f"Threshold reached! Triggering model aggregation with {len(self.pending_updates)} updates")
+                                        self.logger.info(f"Threshold reached for version v{update_version}! Triggering model aggregation with {version_updates} updates")
                                         # Use threading to avoid blocking the execution queue
-                                        aggregation_thread = threading.Thread(target=self.aggregate_models)
+                                        aggregation_thread = threading.Thread(target=self.aggregate_models, args=(update_version,))
                                         aggregation_thread.daemon = True
                                         aggregation_thread.start()
                                     else:
-                                        self.logger.info(f"Threshold reached but this is not the primary node. Waiting for primary to initiate aggregation.")
+                                        self.logger.info(f"Threshold reached for version v{update_version} but this is not the primary node. Waiting for primary to initiate aggregation.")
                 else:
                     result = "ERROR: Invalid UPDATE_MODEL format"
             
@@ -1461,13 +1494,28 @@ class PBFTNode:
                         self.logger.warning(f"Rolling back invalid operation: {operation}")
                         del self.state[key]
 
-    def aggregate_models(self):
-        """Aggregate model updates into a new global model using simple averaging"""
+    def aggregate_models(self, version=None):
+        """Aggregate model updates into a new global model using simple averaging
+        
+        Args:
+            version: Optional specific version of updates to aggregate
+        """
         if not self.pbft.is_primary_node():
             self.logger.warning("Only primary node can perform aggregation")
             return
         
-        self.logger.info(f"Starting model aggregation with {len(self.pending_updates)} updates")
+        # If no specific version is provided, use the current global model version
+        if version is None:
+            version = self.global_model_version
+        
+        # Get updates for the specified version
+        if hasattr(self, 'pending_updates_by_version') and version in self.pending_updates_by_version:
+            updates_to_aggregate = self.pending_updates_by_version[version]
+        else:
+            # Fall back to all pending updates if version-specific ones aren't available
+            updates_to_aggregate = self.pending_updates
+        
+        self.logger.info(f"Starting model aggregation for version v{version} with {len(updates_to_aggregate)} updates")
         
         try:
             # Get current global model info
@@ -1505,10 +1553,10 @@ class PBFTNode:
                     self.logger.warning(f"Skipping non-tensor key in global model: {key}")
             
             # Load all update models
-            self.logger.info(f"Loading {len(self.pending_updates)} update models")
+            self.logger.info(f"Loading {len(updates_to_aggregate)} update models")
             update_weights = []
             
-            for update in self.pending_updates:
+            for update in updates_to_aggregate:
                 model_path = update['model_path']
                 if not os.path.exists(model_path):
                     self.logger.warning(f"Update model file not found: {model_path}")
@@ -1564,7 +1612,7 @@ class PBFTNode:
                             self.logger.warning(f"Could not cast {key} back to {original_dtype}, keeping as float64")
             
             # Create a new global model file
-            new_version = self.global_model_version + 1
+            new_version = version + 1  # Increment version
             timestamp = int(time.time())
             new_model_filename = f"global_model_v{new_version}_{timestamp}.npz"
             new_model_path = os.path.join(npz_dir, new_model_filename)
@@ -1588,7 +1636,8 @@ class PBFTNode:
                 'architecture': global_model_info.get('architecture', 'mobilenet_v2'),
                 'num_classes': global_model_info.get('num_classes', 10),
                 'aggregated_from': len(update_weights),
-                'parent_version': global_model_info.get('version', 1)
+                'parent_version': version,  # Track which version this was aggregated from
+                'based_on_updates': [update['client_id'] for update in updates_to_aggregate]
             }
             
             # Create a consensus request to update all nodes with the new global model
@@ -1597,10 +1646,16 @@ class PBFTNode:
             
             # Update local state
             self.global_model_version = new_version
-            # Clear pending updates after successful aggregation
+            # Clear the specific version's pending updates after successful aggregation
+            if hasattr(self, 'pending_updates_by_version') and version in self.pending_updates_by_version:
+                self.pending_updates_by_version[version] = []
+            
+            # Update local tracking
+            self.global_model_version = new_version
+            # Clear all pending updates after successful aggregation
             self.pending_updates = []
             
-            self.logger.info(f"Model aggregation completed: created global model v{new_version}")
+            self.logger.info(f"Model aggregation completed: created global model v{new_version} from update models v{version}")
             
         except Exception as e:
             self.logger.error(f"Error during model aggregation: {e}")
