@@ -7,14 +7,17 @@ import os
 from typing import Dict, List
 import logging
 import queue
+import traceback
+import numpy as np
+import torch
+import torch.nn as nn
+
+from going_modular.model import Net
+from flowerclient import FlowerClient
+
 from blockchain import Blockchain
 from block import Block
 from pbft import PBFT
-import numpy as np
-from sklearn.neural_network import MLPClassifier
-import torch
-
-from flowerclient import FlowerClient
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -1182,11 +1185,6 @@ class PBFTNode:
                             
                             # Load and evaluate the global model
                             try:
-                                import torch
-                                import torch.nn as nn
-                                import numpy as np
-                                from going_modular.model import Net
-                                
                                 # Load the model
                                 device = torch.device("cpu")
                                 
@@ -1251,7 +1249,7 @@ class PBFTNode:
                             
                             except Exception as e:
                                 self.logger.error(f"Error evaluating global model: {e}")
-                                import traceback
+
                                 traceback.print_exc()
                                 # Default to accepting the update if we can't evaluate the global model
                                 self.global_model_metrics[global_model_path] = {
@@ -1532,9 +1530,6 @@ class PBFTNode:
                 self.logger.error(f"Global model file not found: {global_model_path}")
                 return
             
-            # Load the global model
-            import numpy as np
-            
             # Create directories if needed
             models_dir = "models"
             npz_dir = "models/npz"
@@ -1659,7 +1654,6 @@ class PBFTNode:
             
         except Exception as e:
             self.logger.error(f"Error during model aggregation: {e}")
-            import traceback
             traceback.print_exc()
 
     def create_new_global_model_consensus(self, model_data):

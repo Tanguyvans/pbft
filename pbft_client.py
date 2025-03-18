@@ -3,9 +3,16 @@ import socket
 import json
 import logging
 import hashlib
+import traceback
 from sklearn.model_selection import train_test_split
 import os
 import numpy as np
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from going_modular.model import Net
+from torch.utils.data import DataLoader, TensorDataset
 
 from flowerclient import FlowerClient
 
@@ -243,14 +250,7 @@ class PBFTClient:
             self.logger.info("Evaluating global model before training")
             pre_train_loss, pre_train_accuracy = self.evaluate_model(model_path)
             
-            print("Step 1: Loading model architecture...")
-            from going_modular.model import Net
-            import torch
-            import torch.nn as nn
-            import torch.optim as optim
-            from torch.utils.data import DataLoader, TensorDataset
-            import numpy as np
-            
+            print("Step 1: Loading model architecture...")            
             # Force CPU usage to avoid MPS bus errors
             device = torch.device("cpu")
             print("Using CPU device for training (avoiding MPS due to stability issues)")
@@ -411,13 +411,11 @@ class PBFTClient:
                 
             except Exception as e:
                 print(f"Error during training: {str(e)}")
-                import traceback
                 traceback.print_exc()
                 return None, None, None
                 
         except Exception as e:
             print(f"Error in train method: {str(e)}")
-            import traceback
             traceback.print_exc()
             return None, None, None
 
@@ -496,13 +494,7 @@ class PBFTClient:
         """
         self.logger.info("Evaluating model performance")
         
-        try:
-            import torch
-            import torch.nn as nn
-            from going_modular.model import Net
-            from torch.utils.data import DataLoader, TensorDataset
-            import numpy as np
-            
+        try:            
             # Use CPU for evaluation to avoid MPS memory issues
             device = torch.device("cpu")
             self.logger.info("Using CPU device for evaluation (more stable)")
@@ -626,6 +618,5 @@ class PBFTClient:
                 
         except Exception as e:
             self.logger.error(f"Error during evaluation: {str(e)}")
-            import traceback
             traceback.print_exc()
             return None, None
