@@ -19,7 +19,6 @@ from blockchain import Blockchain
 from block import Block
 from pbft import PBFT
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 class PBFTNode:
@@ -93,9 +92,7 @@ class PBFTNode:
                 
                 # First make sure all nodes are aware of this request
                 self.broadcast(request)
-                
-                if self.pbft.is_primary_node():
-                    self.pbft.start_consensus(request_id)
+                self.pbft.start_consensus(request_id)
                 
                 self.logger.info(f"Primary status: {self.node_id} is the primary node")
             
@@ -178,7 +175,6 @@ class PBFTNode:
         if msg_type == 'request':
             self.handle_request(message)
         elif msg_type in ['pre-prepare', 'prepare', 'commit', 'view-change', 'new-view', 'heartbeat']:
-            # Pass PBFT protocol messages to the PBFT module
             self.pbft.process_message(message)
         elif msg_type == 'block-sync':
             self.handle_block_sync(message)

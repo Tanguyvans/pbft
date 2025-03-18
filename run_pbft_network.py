@@ -111,14 +111,15 @@ def simulate_primary_failure(nodes):
     
     return primary_node
 
-def add_new_node(nodes, next_node_id, host='127.0.0.1', base_port=8000):
+def add_new_node(nodes, next_node_id, test_set, host='127.0.0.1', base_port=8000):
     """Add a new node to the PBFT network"""
     # Create node configuration
     port = base_port + next_node_id
     node_config = {
         'id': next_node_id,
         'host': host,
-        'port': port
+        'port': port,
+        'test_set': test_set
     }
     
     # Get all existing node configs
@@ -135,8 +136,8 @@ def add_new_node(nodes, next_node_id, host='127.0.0.1', base_port=8000):
             unique_configs.append(config)
             seen_ids.add(config['id'])
     
-    # Create the new node
-    node = PBFTNode(next_node_id, host, port, unique_configs)
+    # Fix: Pass the test_set parameter to the PBFTNode constructor
+    node = PBFTNode(next_node_id, host, port, unique_configs, test_set)
     
     # Find the current primary node
     primary_node = None
@@ -449,7 +450,7 @@ def main():
                     print("Could not identify primary node")
             
             elif choice == '10':
-                new_node, next_node_id = add_new_node(nodes, next_node_id)
+                new_node, next_node_id = add_new_node(nodes, next_node_id, test_set=node_test_sets[0])
                 nodes.append(new_node)
                 print(f"Added new node with ID {new_node.node_id}")
             
