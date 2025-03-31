@@ -11,6 +11,7 @@ import traceback
 import numpy as np
 import torch
 import torch.nn as nn
+import re
 
 from going_modular.model import Net
 from flowerclient import FlowerClient
@@ -213,7 +214,7 @@ class PBFTNode:
                 operation = f"{operation} v{global_model_version}"
                 message['operation'] = operation
         
-        # Calculate request digest
+        # Calculate request digest (including cluster validation requests)
         request_data = f"{client_id}:{timestamp}:{operation}"
         digest = hashlib.sha256(request_data.encode()).hexdigest()
         
@@ -279,7 +280,6 @@ class PBFTNode:
         result = None
         state_changed = False
         
-        # Parse and execute the operation
         try:
             if operation.startswith('UPDATE_MODEL '):
                 # Format: UPDATE_MODEL model_path model_hash loss accuracy [vX]
@@ -406,10 +406,11 @@ class PBFTNode:
                 
                 # Save the model weights
                 np.savez(model_path, **numpy_dict)
+                time.sleep(0.1) # Add a small delay to ensure file write completes
                 
                 # Calculate hash of the model file
                 model_hash = ""
-                with open(model_path, 'rb') as f:
+                with open(model_path, 'rb') as f: # Ensure file is properly closed after reading
                     model_hash = hashlib.sha256(f.read()).hexdigest()
                 
                 self.logger.info(f"Global model saved to {model_path} with hash {model_hash}")
@@ -529,6 +530,135 @@ class PBFTNode:
                                 # Log the update
                                 old_version = old_model_info.get('version', 0) if old_model_info else 0
                                 self.logger.info(f"Updated global model from v{old_version} to v{version}")
+            elif operation.startswith('CLUSTER_TRAIN_VALIDATE '):
+                # --- Use Regex for Robust Parsing ---
+                # Pattern to find key='value' or key=number pairs
+                # \w+ matches the key (word characters)
+                # = matches the equals sign
+                # (?:...) is a non-capturing group for alternation
+                # '[^']*' matches anything inside single quotes (non-greedy)
+                # \d+ matches one or more digits (for IDs/versions)
+                pattern = r"(\w+)=(?:'([^']*)'|(\d+))"
+                
+                params = {}
+                try:
+                    # Find all key=value pairs after the initial command
+                    command_part, args_part = operation.split(' ', 1)
+                    for match in re.finditer(pattern, args_part):
+                        key = match.group(1)
+                        # Value can be in group 2 (string) or group 3 (number)
+                        value = match.group(2) if match.group(2) is not None else match.group(3)
+                        params[key] = value
+                except ValueError: # Handle case where there are no args after command
+                    self.logger.error("Could not split operation into command and args.")
+                    params = {} # Ensure params is empty dict
+                except Exception as e:
+                    self.logger.error(f"Error parsing CLUSTER_TRAIN_VALIDATE args with regex: {e}")
+                    params = {} # Ensure params is empty dict
+
+
+                cluster_id = None
+                agg_model_path = None
+                agg_model_hash = None
+                client_ids_list = None
+                global_model_version = None
+
+                try:
+                    cluster_id = int(params.get('cluster_id')) if 'cluster_id' in params else None
+                    agg_model_path = params.get('aggregated_model_path')
+                    agg_model_hash = params.get('aggregated_model_hash')
+                    client_ids_str = params.get('client_ids')
+                    global_model_version = int(params.get('global_model_version')) if 'global_model_version' in params else None
+
+                    if client_ids_str:
+                        client_ids_list = json.loads(client_ids_str)
+                    else:
+                         self.logger.warning("client_ids string not found in parsed params.")
+
+
+                except (TypeError, ValueError, json.JSONDecodeError) as e:
+                    self.logger.error(f"Error converting parsed CLUSTER_TRAIN_VALIDATE params: {e}")
+                    # Set potentially problematic variables back to None
+                    if isinstance(e, (TypeError, ValueError)):
+                         if 'cluster_id' not in params or not isinstance(params.get('cluster_id'), str) or not params.get('cluster_id').isdigit(): cluster_id = None
+                         if 'global_model_version' not in params or not isinstance(params.get('global_model_version'), str) or not params.get('global_model_version').isdigit(): global_model_version = None
+                    if isinstance(e, json.JSONDecodeError): client_ids_list = None
+
+
+                # --- Validation and Processing (using parsed values) ---
+                if cluster_id is not None and agg_model_path and agg_model_hash and client_ids_list and global_model_version is not None:
+                    self.logger.info(f"Processing cluster validation request for Cluster ID: {cluster_id}, based on global v{global_model_version}")
+                    self.logger.info(f"  Aggregated Model Path: {agg_model_path}")
+                    self.logger.info(f"  Aggregated Model Hash: {agg_model_hash}")
+                    self.logger.info(f"  Contributing Clients: {client_ids_list}")
+
+                    # --- Perform Validation ---
+                    is_cluster_valid = False
+                    if not os.path.exists(agg_model_path):
+                        self.logger.error(f"Validation FAILED: Aggregated model file not found: {agg_model_path}")
+                        result = f"ERROR: Aggregated model file not found: {agg_model_path}"
+                    else:
+                         # Verify hash
+                         with open(agg_model_path, 'rb') as f:
+                             actual_hash = hashlib.sha256(f.read()).hexdigest()
+                         if actual_hash != agg_model_hash:
+                             self.logger.warning(f"Validation FAILED: Aggregated model hash mismatch!")
+                             self.logger.warning(f"  Expected: {agg_model_hash}")
+                             self.logger.warning(f"  Actual:   {actual_hash}")
+                             result = "ERROR: Aggregated model hash mismatch"
+                         else:
+                             self.logger.info("✅ Aggregated model hash verified.")
+                             is_cluster_valid = True
+
+                    # --- If Valid, Add to Pending Aggregations ---
+                    if is_cluster_valid:
+                        update_info = {
+                            'type': 'cluster_aggregation', 
+                            'client_id': f"cluster_{cluster_id}", 
+                            'model_path': agg_model_path,
+                            'model_hash': agg_model_hash,
+                            'client_ids': client_ids_list, 
+                            'training_loss': None, 
+                            'training_accuracy': None,
+                            'timestamp': int(time.time()),
+                            'version': global_model_version 
+                        }
+                        with self.state_lock:
+                            if not hasattr(self, 'pending_updates_by_version'): self.pending_updates_by_version = {}
+                            if global_model_version not in self.pending_updates_by_version: self.pending_updates_by_version[global_model_version] = []
+                            self.pending_updates_by_version[global_model_version].append(update_info)
+                            self.pending_updates.append(update_info)
+                            version_updates = len(self.pending_updates_by_version[global_model_version])
+                            self.logger.info(f"Added validated cluster result (based on v{global_model_version}) to pending list. "
+                                             f"Current count for v{global_model_version}: {version_updates}/{self.update_threshold}")
+                            if 'cluster_validations' not in self.state: self.state['cluster_validations'] = {}
+                            state_key = f"cluster_{cluster_id}_seq_{sequence}"
+                            self.state['cluster_validations'][state_key] = {
+                                'status': 'VALIDATED', 
+                                'aggregated_model_path': agg_model_path,
+                                'aggregated_model_hash': agg_model_hash,
+                                'client_ids': client_ids_list,
+                                'based_on_version': global_model_version,
+                                'timestamp': time.time()
+                            }
+                            result = f"CLUSTER_VALIDATED: cluster_id={cluster_id}, added to pending aggregation v{global_model_version}"
+                            state_changed = True
+
+                        # Check if we should trigger aggregation
+                        if version_updates >= self.update_threshold:
+                            if self.pbft.is_primary_node():
+                                self.logger.info(f"Threshold reached for version v{global_model_version}! Triggering model aggregation including cluster result.")
+                                aggregation_thread = threading.Thread(target=self.aggregate_models, args=(global_model_version,))
+                                aggregation_thread.daemon = True
+                                aggregation_thread.start()
+                            else:
+                                self.logger.info(f"Threshold reached for v{global_model_version} but not primary. Waiting for primary.")
+                        
+                    # else: result is already set by the failing validation check
+
+                else: # Parsing failed or essential parameters missing
+                    result = f"ERROR: Invalid CLUSTER_TRAIN_VALIDATE format or missing essential parameters. Parsed params: {params}"
+                    self.logger.error(result)
             else:
                 self.logger.warning(f"Unknown operation format: {operation}")
                 result = f"UNKNOWN_OPERATION: {operation}"
@@ -536,7 +666,7 @@ class PBFTNode:
             self.logger.error(f"Error executing operation: {e}")
             result = f"ERROR: {str(e)}"
         
-        # Create a new block for state-changing operations
+        # Create a new block for state-changing operations (including CLUSTER_TRAIN_VALIDATE)
         if state_changed:
             self.logger.info(f"Creating block for operation: {operation}, sequence: {sequence}, view: {view}")
             with self.blockchain_lock:
@@ -563,9 +693,10 @@ class PBFTNode:
                             'block_id': block_id,
                             'request_id': request_id,
                             'result': result,
-                            'state_snapshot': self.state.copy()
+                            # Include state snapshot only for simple ops, or specific parts for complex ops
+                            'state_snapshot': self.state.copy() if not operation.startswith('CLUSTER_') else { 'cluster_validations': self.state.get('cluster_validations', {}).copy() }
                         },
-                        model_type="key-value-operation",
+                        model_type="cluster-validation-request" if operation.startswith('CLUSTER_') else "key-value-operation",
                         storage_reference=f"op-{block_id}",
                         calculated_hash=hashlib.sha256(str(self.state).encode()).hexdigest(),
                         participants=[str(self.node_id)]
@@ -1505,152 +1636,162 @@ class PBFTNode:
         # Get updates for the specified version
         if hasattr(self, 'pending_updates_by_version') and version in self.pending_updates_by_version:
             updates_to_aggregate = self.pending_updates_by_version[version]
+            # Filter out any potential None entries if errors occurred during addition
+            updates_to_aggregate = [u for u in updates_to_aggregate if u is not None] 
         else:
-            # Fall back to all pending updates if version-specific ones aren't available
-            updates_to_aggregate = self.pending_updates
-        
+            # Fall back is less useful now, rely on version specific
+             self.logger.warning(f"No pending updates found for specified version v{version} to aggregate.")
+             return
+             # updates_to_aggregate = self.pending_updates # Old fallback
+
+        if not updates_to_aggregate:
+             self.logger.warning(f"No valid updates to aggregate for version v{version}.")
+             return
+
         self.logger.info(f"Starting model aggregation for version v{version} with {len(updates_to_aggregate)} updates")
-        
+
         try:
-            # Get current global model info
+            self.logger.debug(f"[AGG_V{version}] Starting try block.")
+            
+            # --- Get Current Global Model Info (Needed for architecture etc.) ---
             global_model_info = None
-            try:
-                global_model_info = json.loads(self.state['global_model'])
-            except (KeyError, json.JSONDecodeError):
-                self.logger.error("Failed to get global model info, cannot aggregate")
-                return
-            
-            # Get the current global model path
-            global_model_path = global_model_info.get('storage_path')
-            if not global_model_path or not os.path.exists(global_model_path):
-                self.logger.error(f"Global model file not found: {global_model_path}")
-                return
-            
-            # Create directories if needed
+            with self.state_lock:
+                if 'global_model' in self.state:
+                    try:
+                        global_model_info = json.loads(self.state['global_model'])
+                    except Exception as e:
+                        self.logger.error(f"[AGG_V{version}] Failed to parse current global model info: {e}")
+                        # Decide how to handle this - maybe return? For now, log and continue cautiously.
+                if global_model_info is None:
+                    self.logger.warning(f"[AGG_V{version}] Cannot find current global model info. Using defaults.")
+                    # Set defaults if info is missing
+                    global_model_info = {'architecture': 'mobilenet_v2', 'num_classes': 10}
+
+
+            # --- Create Directories ---
             models_dir = "models"
             npz_dir = "models/npz"
             os.makedirs(models_dir, exist_ok=True)
             os.makedirs(npz_dir, exist_ok=True)
-            
-            # Load the current global model
-            self.logger.info(f"Loading global model from {global_model_path}")
-            global_npz = np.load(global_model_path, allow_pickle=True)
-            global_weights = {}
-            
-            for key in global_npz.files:
-                try:
-                    global_weights[key] = global_npz[key]
-                except TypeError:
-                    self.logger.warning(f"Skipping non-tensor key in global model: {key}")
-            
-            # Load all update models
-            self.logger.info(f"Loading {len(updates_to_aggregate)} update models")
+
+            # --- Load Update Model Weights ---
+            self.logger.info(f"Loading {len(updates_to_aggregate)} update model(s)/result(s)")
             update_weights = []
             
             for update in updates_to_aggregate:
-                model_path = update['model_path']
-                if not os.path.exists(model_path):
-                    self.logger.warning(f"Update model file not found: {model_path}")
+                model_path = update.get('model_path') # Use .get for safety
+                update_type = update.get('type', 'model_update') # Default to individual update
+                
+                if not model_path or not os.path.exists(model_path):
+                    self.logger.warning(f"Update model file not found: {model_path}, skipping this update.")
                     continue
                 
-                # Load the update model
-                self.logger.info(f"Loading update model from {model_path}")
-                update_npz = np.load(model_path, allow_pickle=True)
-                model_weights = {}
+                # Verify hash before loading (important for cluster results too)
+                expected_hash = update.get('model_hash')
+                if expected_hash:
+                     with open(model_path, 'rb') as f:
+                         actual_hash = hashlib.sha256(f.read()).hexdigest()
+                     if actual_hash != expected_hash:
+                         self.logger.warning(f"[AGG_V{version}] Hash mismatch for {model_path}! Skipping.")
+                         continue
                 
-                for key in update_npz.files:
-                    try:
-                        model_weights[key] = update_npz[key]
-                    except TypeError:
-                        self.logger.warning(f"Skipping non-tensor key in update model: {key}")
-                
-                if model_weights:
-                    update_weights.append(model_weights)
-            
+                # Load the update model weights
+                try:
+                    self.logger.info(f"[AGG_V{version}] Loading weights from {model_path} (Type: {update_type})")
+                    update_npz = np.load(model_path, allow_pickle=True)
+                    model_weights = {}
+                    for key in update_npz.files:
+                        try: model_weights[key] = update_npz[key]
+                        except: self.logger.warning(f"[AGG_V{version}] Skipping non-tensor key {key} in {model_path}")
+                    
+                    if model_weights:
+                        update_weights.append(model_weights)
+                    else:
+                         self.logger.warning(f"[AGG_V{version}] No valid weights found in {model_path}")
+
+                except Exception as e:
+                     self.logger.error(f"[AGG_V{version}] Error loading weights from {model_path}: {e}")
+                     continue # Skip this update if loading fails
+
             if not update_weights:
-                self.logger.warning("No valid update models found, skipping aggregation")
+                self.logger.warning(f"[AGG_V{version}] No valid weights loaded, aborting aggregation.")
                 return
             
-            # Simple averaging of models (equal weights)
-            self.logger.info(f"Performing simple averaging of {len(update_weights)} models")
+            self.logger.debug(f"[AGG_V{version}] Averaging weights.")
+            # --- Simple Averaging ---
             aggregated_weights = {}
-            
-            # Initialize aggregated weights with zeros of the same shape and dtype as global weights
-            for key in global_weights:
-                # Convert to float64 to avoid casting issues
-                aggregated_weights[key] = np.zeros_like(global_weights[key], dtype=np.float64)
-            
-            # Average all update models
-            for model_weights in update_weights:
+            first_weights = update_weights[0]
+            num_models_averaged = len(update_weights)
+
+            # Initialize with zeros (using float64 for accumulation)
+            for key in first_weights:
+                 aggregated_weights[key] = np.zeros_like(first_weights[key], dtype=np.float64)
+
+            # Sum weights
+            for weights in update_weights:
                 for key in aggregated_weights:
-                    if key in model_weights:
-                        # Convert to float64 before adding to avoid casting issues
-                        weight_array = model_weights[key].astype(np.float64)
-                        aggregated_weights[key] += weight_array / len(update_weights)
-            
-            # Convert back to original dtype if needed
+                    if key in weights:
+                        aggregated_weights[key] += weights[key].astype(np.float64)
+
+            # Average weights
             for key in aggregated_weights:
-                if key in global_weights:
-                    # Convert back to the original dtype of the global model
-                    original_dtype = global_weights[key].dtype
+                aggregated_weights[key] /= num_models_averaged
+                # Cast back to original dtype if possible
+                try:
+                    original_dtype = first_weights[key].dtype
                     if original_dtype != np.float64:
-                        self.logger.info(f"Converting {key} back to original dtype: {original_dtype}")
-                        # Use astype with 'same_kind' casting to avoid precision loss
-                        try:
-                            aggregated_weights[key] = aggregated_weights[key].astype(original_dtype)
-                        except TypeError:
-                            # If casting fails, keep as float64
-                            self.logger.warning(f"Could not cast {key} back to {original_dtype}, keeping as float64")
-            
-            # Create a new global model file
-            new_version = version + 1  # Increment version
+                        aggregated_weights[key] = aggregated_weights[key].astype(original_dtype)
+                except Exception as e:
+                    self.logger.warning(f"[AGG_V{version}] Could not cast aggregated key {key} back to original dtype: {e}")
+
+
+            # --- Save New Aggregated Model ---
+            new_version = version + 1
             timestamp = int(time.time())
             new_model_filename = f"global_model_v{new_version}_{timestamp}.npz"
             new_model_path = os.path.join(npz_dir, new_model_filename)
-            
-            # Save the aggregated model
-            self.logger.info(f"Saving new global model to {new_model_path}")
+
+            self.logger.debug(f"[AGG_V{version}] Saving new model file: {new_model_path}")
             np.savez(new_model_path, **aggregated_weights)
-            
-            # Calculate hash of the new model file
+
+            # --- Calculate Hash ---
+            new_model_hash = ""
             with open(new_model_path, 'rb') as f:
                 new_model_hash = hashlib.sha256(f.read()).hexdigest()
-            
-            # Create model metadata
+
+            self.logger.debug(f"[AGG_V{version}] Creating metadata.")
+            # Create model metadata for the new global model
             new_model_data = {
-                'type': 'aggregated_model',
-                'version': new_version,
-                'created_by': f"node-{self.node_id}",
-                'timestamp': timestamp,
-                'storage_path': new_model_path,
-                'hash': new_model_hash,
-                'architecture': global_model_info.get('architecture', 'mobilenet_v2'),
-                'num_classes': global_model_info.get('num_classes', 10),
-                'aggregated_from': len(update_weights),
-                'parent_version': version,  # Track which version this was aggregated from
-                'based_on_updates': [update['client_id'] for update in updates_to_aggregate]
+                 'type': 'aggregated_model',
+                 'version': new_version,
+                 'created_by': f"node-{self.node_id}",
+                 'timestamp': timestamp,
+                 'storage_path': new_model_path,
+                 'hash': new_model_hash,
+                 'architecture': global_model_info.get('architecture', 'mobilenet_v2'),
+                 'num_classes': global_model_info.get('num_classes', 10),
+                 'aggregated_from_version': version,
+                 'num_updates_aggregated': len(updates_to_aggregate),
+                 'aggregated_from_types': [u.get('type', 'model_update') for u in updates_to_aggregate],
+                 'based_on_updates_details': updates_to_aggregate # Potentially large, consider summarizing if needed
             }
-            
-            # Create a consensus request to update all nodes with the new global model
-            self.logger.info("Initiating consensus for the new global model")
+
+            self.logger.debug(f"[AGG_V{version}] Calling create_new_global_model_consensus.")
             self.create_new_global_model_consensus(new_model_data)
             
-            # Update local state
-            self.global_model_version = new_version
-            # Clear the specific version's pending updates after successful aggregation
+            # --- Cleanup ---
+            # Clear the specific version's pending updates after successful aggregation attempt
+            # (Consensus will handle the actual state update)
             if hasattr(self, 'pending_updates_by_version') and version in self.pending_updates_by_version:
-                self.pending_updates_by_version[version] = []
-            
-            # Update local tracking
-            self.global_model_version = new_version
-            # Clear all pending updates after successful aggregation
-            self.pending_updates = []
-            
-            self.logger.info(f"Model aggregation completed: created global model v{new_version} from update models v{version}")
+                 self.logger.info(f"[AGG_V{version}] Clearing pending updates after initiating aggregation consensus.")
+                 self.pending_updates_by_version[version] = []
+
+            self.logger.info(f"[AGG_V{version}] Aggregation process completed successfully. Initiated consensus for v{new_version}.")
             
         except Exception as e:
-            self.logger.error(f"Error during model aggregation: {e}")
-            traceback.print_exc()
+             self.logger.error(f"[AGG_V{version}] Error during model aggregation: {e}")
+             traceback.print_exc()
+             # Ensure cleanup happens if possible
 
     def create_new_global_model_consensus(self, model_data):
         """Create a consensus request for the new global model"""
@@ -1665,7 +1806,7 @@ class PBFTNode:
         
         # Check if we've already initiated consensus for this version
         if hasattr(self, 'global_model_consensus_versions') and version in self.global_model_consensus_versions:
-            self.logger.warning(f"Already initiated consensus for global model v{version}, skipping")
+            self.logger.warning(f"[CONSENSUS_V{version}] Already initiated, skipping.")
             return
         
         # Track this version to avoid duplicates
@@ -1696,9 +1837,11 @@ class PBFTNode:
         })
         
         # Broadcast request to all nodes
+        self.logger.debug(f"[CONSENSUS_V{version}] Broadcasting request.")
         self.broadcast(request)
         
         # Start consensus
+        self.logger.debug(f"[CONSENSUS_V{version}] Calling pbft.start_consensus.")
         self.pbft.start_consensus(request_id)
         
-        self.logger.info(f"Initiated consensus for new global model v{model_data['version']}")
+        self.logger.info(f"[CONSENSUS_V{version}] Initiated consensus for new global model v{version}")

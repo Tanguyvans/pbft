@@ -207,15 +207,17 @@ class PBFTClient:
             time.sleep(0.5)  # Give other nodes a chance to connect before closing
             response_socket.close()
 
-    def train(self):       
+    def train(self, send_update=True, return_weights=False):
         """Train a local model based on the global model"""
+        global_model_version_used = None # Variable to store the version
         try:
             # First, get the global model info
             model_info = self.get_global_model()
             
             if not model_info:
                 self.logger.error("Cannot train without global model info")
-                return None, None, None
+                # Return version as None too
+                return None, None, None, None 
             
             self.logger.info(f"Received global model info: {model_info}")
             
@@ -224,13 +226,13 @@ class PBFTClient:
             expected_hash = model_info.get('model_hash')
             architecture = model_info.get('architecture', 'mobilenet_v2')
             
-            # Get the global model version - this is important for our versioning
-            global_model_version = model_info.get('version', 1)
+            # Get the global model version - THIS IS IMPORTANT
+            global_model_version_used = model_info.get('version', 1) # Store the version
             
             # Verify the model file exists
             if not os.path.exists(model_path):
                 self.logger.error(f"Model file not found: {model_path}")
-                return None, None, None
+                return None, None, None, None
             
             # Verify the model hash
             with open(model_path, 'rb') as f:
@@ -363,61 +365,65 @@ class PBFTClient:
                     model.load_state_dict(best_model_state)
                     print("Loaded best model based on loss")
                 
-                # Save the trained model directly as NPZ with version in filename
-                npz_dir = "models/npz"
-                os.makedirs(npz_dir, exist_ok=True)  # Ensure directory exists
-                
-                timestamp = int(time.time())
-                # Include the global model version in the filename
-                npz_path = f"{npz_dir}/model_{self.client_id}_v{global_model_version}_{timestamp}.npz"
-                
-                # Convert PyTorch model to numpy arrays - only save the tensors
+                # Convert final model weights to numpy
                 numpy_dict = {k: v.cpu().numpy() for k, v in model.state_dict().items()}
-                
-                # Save as NPZ - don't include metadata in the file itself
-                np.savez(npz_path, **numpy_dict)
-                self.logger.info(f"Model saved as NPZ: {npz_path} (based on global model v{global_model_version})")
-                
-                # Store metadata separately if needed
-                model_metadata = {
-                    'architecture': architecture,
-                    'num_classes': 10,
-                    'loss': float(best_loss),
-                    'accuracy': float(epoch_acc),
-                    'client_id': self.client_id,
-                    'timestamp': timestamp,
-                    'global_model_version': global_model_version  # Track which global model this is based on
-                }
-                # You could save this metadata to a separate JSON file if needed
-                
+
                 # Evaluate the model after training
                 self.logger.info("Evaluating model after training")
-                post_train_loss, post_train_accuracy = self.evaluate_model(model=model)  # Pass the model directly
+                post_train_loss, post_train_accuracy = self.evaluate_model(model=model)
                 
                 # Log improvement
                 if pre_train_accuracy is not None and post_train_accuracy is not None:
                     improvement = post_train_accuracy - pre_train_accuracy
                     self.logger.info(f"Training improved accuracy by {improvement:.4f} ({improvement*100:.2f}%)")
                 
-                # Format loss and accuracy to avoid parsing issues
-                formatted_loss = float(post_train_loss)
-                formatted_accuracy = float(post_train_accuracy)
+                formatted_loss = float(post_train_loss) if post_train_loss is not None else None
+                formatted_accuracy = float(post_train_accuracy) if post_train_accuracy is not None else None
 
-                # Send the trained model back to the network using test metrics
-                # Include the global model version when sending the model
-                self.send_trained_model(npz_path, formatted_loss, formatted_accuracy, global_model_version)
-                
-                return npz_path, post_train_loss, post_train_accuracy
-                
+                if return_weights:
+                     # Return weights directly without saving or sending update
+                     self.logger.info("Returning trained weights in memory (cluster simulation).")
+                     # Return weights, loss, accuracy, AND the version used
+                     return numpy_dict, formatted_loss, formatted_accuracy, global_model_version_used
+                else:
+                     # Save the trained model to disk
+                     npz_dir = "models/npz"
+                     os.makedirs(npz_dir, exist_ok=True)
+                     timestamp = int(time.time())
+                     npz_path = f"{npz_dir}/model_{self.client_id}_v{global_model_version_used}_{timestamp}.npz"
+                     np.savez(npz_path, **numpy_dict)
+                     self.logger.info(f"Model saved as NPZ: {npz_path} (based on global model v{global_model_version_used})")
+
+                     # Conditionally send the trained model update request
+                     if send_update:
+                         if formatted_loss is not None and formatted_accuracy is not None:
+                             self.send_trained_model(npz_path, formatted_loss, formatted_accuracy, global_model_version_used)
+                         else:
+                             self.logger.error("Cannot send model update due to evaluation failure.")
+                     else:
+                         # This case (send_update=False, return_weights=False) shouldn't normally be hit with the current run_pbft_network logic
+                         self.logger.info("Saving model locally but not sending update.")
+
+                     # Return path, loss, accuracy, AND the version used
+                     return npz_path, post_train_loss, post_train_accuracy, global_model_version_used
+
             except Exception as e:
                 print(f"Error during training: {str(e)}")
                 traceback.print_exc()
-                return None, None, None
-                
+                # Ensure we return None if training fails before saving/sending
+                return None, None, None, None # Modified return on exception
+
+            # Check if training completed successfully before proceeding
+            if best_model_state is None:
+                 print("Training failed, best model state not found.")
+                 # Return version as None too
+                 return None, None, None, None 
+
         except Exception as e:
             print(f"Error in train method: {str(e)}")
             traceback.print_exc()
-            return None, None, None
+            # Return Nones including for the version
+            return None, None, None, None
 
     def send_trained_model(self, model_path, training_loss, training_accuracy, global_model_version=1):
         """Send the trained model back to the PBFT network as a model update

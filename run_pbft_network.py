@@ -2,6 +2,7 @@ import time
 import threading
 import random
 import logging
+import json
 from pbft_node import PBFTNode
 from pbft_client import PBFTClient
 
@@ -11,6 +12,10 @@ from config import settings
 
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
+
+import numpy as np
+import os
+import hashlib
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -207,8 +212,10 @@ def main():
         nodes.append(node)
         logger.info(f"Started node {i} on port {base_port + i}")
     
-    # Give nodes time to start
-    time.sleep(2)
+    # Give nodes time to start AND for the primary to create the initial global model
+    logger.info("Waiting for nodes to start and initial global model creation...")
+    time.sleep(5) # Increased from 2 to 5 seconds
+    logger.info("Initial wait finished.")
     
     # Create clients
     clients = []
@@ -241,6 +248,8 @@ def main():
     
     try:
         next_node_id = num_nodes
+        cluster_size = 3 
+
         while True:
             print("\nPBFT Blockchain Network Menu:")
             print("1. Add a new element to the chain")
@@ -254,9 +263,10 @@ def main():
             print("9. Simulate primary node failure")
             print("10. Add a new node to the network")
             print("11. Simulate selective censorship")
-            print("12. Train clients")
+            print("12. Train clients (Individual)")
+            print("13. Train Client Cluster (MPC Simulation)")
             
-            choice = input("Enter your choice (1-12): ")
+            choice = input(f"Enter your choice (1-{13}): ")
             
             if choice == '1':
                 operation_type = input("Enter operation type (SET/GET/DELETE): ").upper()
@@ -516,10 +526,144 @@ def main():
                     print("Could not find primary node")
             
             elif choice == '12':
-                clients[0].train()
+                # Train a single client (e.g., client 0)
+                client_to_train = clients[0] 
+                print(f"Starting training for {client_to_train.client_id}...")
+                model_path, loss, accuracy = client_to_train.train()
+                if model_path:
+                    print(f"Training complete for {client_to_train.client_id}.")
+                    print(f"  Model saved to: {model_path}")
+                    print(f"  Final Loss: {loss:.4f}, Accuracy: {accuracy*100:.2f}%")
+                else:
+                    print(f"Training failed for {client_to_train.client_id}.")
+            
+            elif choice == '13':
+                # Simulate MPC training for a cluster
+                if len(clients) < cluster_size:
+                    print(f"Not enough clients to form a cluster of size {cluster_size}")
+                    continue
+
+                cluster_clients = clients[:cluster_size]
+                client_ids = [c.client_id for c in cluster_clients]
+                print(f"Starting simulated MPC training for cluster: {client_ids}")
+
+                threads = []
+                results = {} # Use thread-safe collection if needed, dict is ok here
+
+                def train_client_thread(client):
+                    print(f"Starting training thread for {client.client_id}")
+                    # Request weights, get version used
+                    weights, loss, accuracy, version_used = client.train(send_update=False, return_weights=True)
+                    if weights is not None:
+                        results[client.client_id] = {
+                            'weights': weights,
+                            'loss': loss,
+                            'accuracy': accuracy,
+                            'version_used': version_used # Store version
+                        }
+                        print(f"Training thread finished for {client.client_id}, got weights based on v{version_used}.")
+                    else:
+                         results[client.client_id] = None # Indicate failure
+                         print(f"Training thread failed for {client.client_id}")
+
+                for client in cluster_clients:
+                    thread = threading.Thread(target=train_client_thread, args=(client,))
+                    threads.append(thread)
+                    thread.start()
+                
+                # Wait for all threads to complete
+                for thread in threads:
+                    thread.join()
+
+                print(f"\nCluster training finished for {client_ids}")
+                
+                # Check results and collect weights & get the common global model version
+                successful_weights = {}
+                all_successful = True
+                cluster_global_model_version = None # To store the version used by the cluster
+                for client_id in client_ids:
+                    result = results.get(client_id)
+                    if result:
+                        successful_weights[client_id] = result['weights']
+                        # Store the version used by the first successful client
+                        if cluster_global_model_version is None:
+                             cluster_global_model_version = result['version_used']
+                        # Optional: Check if all clients used the same global model version
+                        elif cluster_global_model_version != result['version_used']:
+                             logger.warning(f"Client {client_id} used different global model version "
+                                            f"(v{result['version_used']}) than cluster (v{cluster_global_model_version})")
+                             # Decide how to handle this - maybe fail the aggregation? For now, we proceed.
+
+                        print(f"  {client_id}: Success - Got weights (based on v{result['version_used']}), Acc: {result['accuracy']*100:.2f}%")
+                    else:
+                        print(f"  {client_id}: Failed")
+                        all_successful = False
+                
+                if all_successful and cluster_global_model_version is not None: # Ensure we got a version
+                    print(f"All clients in cluster trained successfully based on global model v{cluster_global_model_version}. Simulating aggregation...")
+                    
+                    # --- Simulate Aggregation (Simple Averaging) ---
+                    aggregated_weights = {}
+                    first_client_weights = list(successful_weights.values())[0]
+                    
+                    # Initialize with zeros
+                    for key in first_client_weights:
+                         aggregated_weights[key] = np.zeros_like(first_client_weights[key], dtype=np.float64)
+
+                    # Sum weights
+                    num_clients_in_agg = len(successful_weights)
+                    for client_id, client_weights in successful_weights.items():
+                         for key in aggregated_weights:
+                             if key in client_weights:
+                                 aggregated_weights[key] += client_weights[key].astype(np.float64)
+                    
+                    # Average weights
+                    for key in aggregated_weights:
+                         aggregated_weights[key] /= num_clients_in_agg
+                         # Optional: Convert back to original dtype (e.g., float32)
+                         try:
+                             original_dtype = first_client_weights[key].dtype
+                             if original_dtype != np.float64:
+                                 aggregated_weights[key] = aggregated_weights[key].astype(original_dtype)
+                         except Exception as e:
+                             logger.warning(f"Could not cast aggregated key {key} back to original dtype: {e}")
+
+                    # --- Save Aggregated Model ---
+                    agg_dir = "models/aggregated"
+                    os.makedirs(agg_dir, exist_ok=True)
+                    timestamp = int(time.time())
+                    # Assuming cluster_id 0 for this example
+                    cluster_id = 0 
+                    agg_model_filename = f"cluster_{cluster_id}_aggregated_{timestamp}.npz"
+                    agg_model_path = os.path.join(agg_dir, agg_model_filename)
+                    
+                    np.savez(agg_model_path, **aggregated_weights)
+                    print(f"Saved aggregated model to: {agg_model_path}")
+
+                    # Calculate hash of aggregated model
+                    agg_model_hash = ""
+                    with open(agg_model_path, 'rb') as f:
+                         agg_model_hash = hashlib.sha256(f.read()).hexdigest()
+                    # ------------------------------------------------
+
+                    # Create the *new* operation string including the global model version
+                    client_ids_str = json.dumps(client_ids)
+                    operation = (f"CLUSTER_TRAIN_VALIDATE cluster_id={cluster_id} "
+                                 f"aggregated_model_path='{agg_model_path}' "
+                                 f"aggregated_model_hash='{agg_model_hash}' "
+                                 f"client_ids='{client_ids_str}' " # Added space
+                                 f"global_model_version={cluster_global_model_version}") # Add version
+
+                    print(f"Sending request: {operation}")
+                    clients[0].send_request(operation) # Client 0 sends the request for the cluster
+                    time.sleep(2)
+                elif not all_successful:
+                    print("Cluster training incomplete or failed. No aggregation or validation request sent.")
+                else: # Case where all successful but version is None (shouldn't happen if get_global_model worked)
+                     print("Cluster training successful, but could not determine global model version used. No request sent.")
 
             else:
-                print("Invalid choice. Please enter a number between 1 and 11.")
+                print(f"Invalid choice. Please enter a number between 1 and {13}.")
     
     except KeyboardInterrupt:
         pass
