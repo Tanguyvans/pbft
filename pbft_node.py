@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import re
 
-from going_modular.model import Net
+from going_modular.model import Net, SimpleMNISTNet
 from flowerclient import FlowerClient
 
 from blockchain import Blockchain
@@ -399,14 +399,20 @@ class PBFTNode:
                 model_path = os.path.join(npz_dir, model_filename)
                 
                 # Get the model's state dict
-                state_dict = self.flower_client.model.state_dict()
-                
-                # Convert PyTorch tensors to numpy arrays
+                try:
+                    # Check if the model held by flower_client is the correct type
+                    if not isinstance(self.flower_client.model, SimpleMNISTNet):
+                         self.logger.warning(f"Node's flower_client model is not SimpleMNISTNet, attempting to create one.")
+                         self.flower_client.model = SimpleMNISTNet() # Ensure it holds the right model type
+                    state_dict = self.flower_client.model.state_dict()
+                except AttributeError:
+                     self.logger.error("self.flower_client does not have a 'model' attribute. Cannot get state_dict.")
+                     # Handle error appropriately, maybe return?
+                     return "ERROR: Node cannot access initial model"
+
                 numpy_dict = {k: v.cpu().numpy() for k, v in state_dict.items()}
-                
-                # Save the model weights
                 np.savez(model_path, **numpy_dict)
-                time.sleep(0.1) # Add a small delay to ensure file write completes
+                time.sleep(0.1) # Keep delay
                 
                 # Calculate hash of the model file
                 model_hash = ""
@@ -423,7 +429,7 @@ class PBFTNode:
                     'timestamp': timestamp,
                     'storage_path': model_path,
                     'hash': model_hash,
-                    'architecture': 'mobilenet_v2',
+                    'architecture': 'simple_mnist_cnn', # <<< CHANGED architecture string
                     'num_classes': 10
                 }
                 
@@ -498,7 +504,6 @@ class PBFTNode:
                             # Get the full model data from the request
                             model_data = request.get('model_data', {})
                             if not model_data:
-                                # If model_data not in request, create basic metadata
                                 model_data = {
                                     'type': 'aggregated_model',
                                     'version': version,
@@ -506,7 +511,7 @@ class PBFTNode:
                                     'timestamp': int(time.time()),
                                     'storage_path': model_path,
                                     'hash': model_hash,
-                                    'architecture': 'mobilenet_v2',
+                                    'architecture': 'simple_mnist_cnn', # <<< CHANGED architecture string
                                     'num_classes': 10
                                 }
                             
@@ -1124,7 +1129,7 @@ class PBFTNode:
                     'version': global_model_info.get('version', 1),
                     'model_path': model_path,
                     'model_hash': model_hash,
-                    'architecture': global_model_info.get('architecture', 'mobilenet_v2'),
+                    'architecture': global_model_info.get('architecture', 'simple_mnist_cnn'), # <<< CHANGED default
                     'num_classes': global_model_info.get('num_classes', 10),
                     'request_id': request_id
                 }
@@ -1343,8 +1348,16 @@ class PBFTNode:
                                 device = torch.device("cpu")
                                 
                                 # Initialize model architecture
-                                architecture = global_model_info.get('architecture', 'mobilenet_v2')
-                                model = Net(num_classes=10, arch=architecture).to(device)
+                                architecture = global_model_info.get('architecture', 'simple_mnist_cnn') # <<< CHANGED default
+                                # --- Instantiate model based on architecture string ---
+                                if architecture == 'simple_mnist_cnn':
+                                     model = SimpleMNISTNet(num_classes=10).to(device) # <<< USE NEW MODEL CLASS
+                                elif architecture == 'mobilenet_v2': # Keep old logic if needed
+                                     model = Net(num_classes=10, arch=architecture).to(device)
+                                else:
+                                     self.logger.error(f"Unknown architecture '{architecture}' during validation.")
+                                     raise ValueError(f"Unknown architecture: {architecture}")
+                                # --- End Instantiate ---
                                 
                                 # Load weights based on file extension
                                 if global_model_path.endswith('.npz'):
@@ -1691,8 +1704,7 @@ class PBFTNode:
                         # Decide how to handle this - maybe return? For now, log and continue cautiously.
                 if global_model_info is None:
                     self.logger.warning(f"[AGG_V{version}] Cannot find current global model info. Using defaults.")
-                    # Set defaults if info is missing
-                    global_model_info = {'architecture': 'mobilenet_v2', 'num_classes': 10}
+                    global_model_info = {'architecture': 'simple_mnist_cnn', 'num_classes': 10} # <<< CHANGED default
 
 
             # --- Create Directories ---
@@ -1795,7 +1807,7 @@ class PBFTNode:
                  'timestamp': timestamp,
                  'storage_path': new_model_path,
                  'hash': new_model_hash,
-                 'architecture': global_model_info.get('architecture', 'mobilenet_v2'),
+                 'architecture': global_model_info.get('architecture', 'simple_mnist_cnn'), # <<< CHANGED default
                  'num_classes': global_model_info.get('num_classes', 10),
                  'aggregated_from_version': version,
                  'num_updates_aggregated': len(updates_to_aggregate),

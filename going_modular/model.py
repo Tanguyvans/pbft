@@ -4,6 +4,7 @@ import torch
 from torch.hub import load_state_dict_from_url
 import torchvision.models as models
 import math
+from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
 
 class SimpleNet(nn.Module):
     """
@@ -242,6 +243,7 @@ class ShuffleNet(nn.Module):
             return out, features
         else:
             return self.model(x)
+
 class Net(nn.Module):
     """
     This is a generic class to choose the architecture of the model.
@@ -279,3 +281,35 @@ class Net(nn.Module):
 
         # self.model.forward(x)
         return self.model(x)
+
+# Simple CNN for MNIST (Add this class)
+class SimpleMNISTNet(nn.Module):
+    def __init__(self, num_classes=10): # num_classes=10 for MNIST digits 0-9
+        super(SimpleMNISTNet, self).__init__()
+        # Input channels = 1 (grayscale), output channels = 10
+        self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
+        # Output channels = 20
+        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
+        self.conv2_drop = nn.Dropout2d() # Some dropout
+        # Flattened size depends on pooling:
+        # Input 28x28 -> conv1 -> 24x24 -> pool -> 12x12
+        # 12x12 -> conv2 -> 8x8 -> pool -> 4x4
+        # Flattened: 20 * 4 * 4 = 320
+        self.fc1 = nn.Linear(320, 50)
+        self.fc2 = nn.Linear(50, num_classes)
+
+    def forward(self, x):
+        # Conv1 -> ReLU -> MaxPool
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))
+        # Conv2 -> Dropout -> ReLU -> MaxPool
+        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
+        # Flatten
+        x = x.view(-1, 320)
+        # FC1 -> ReLU
+        x = F.relu(self.fc1(x))
+        # Dropout
+        x = F.dropout(x, training=self.training)
+        # FC2 (Output)
+        x = self.fc2(x)
+        # LogSoftmax for classification output
+        return F.log_softmax(x, dim=1)

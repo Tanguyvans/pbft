@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from going_modular.model import Net
+from going_modular.model import Net, SimpleMNISTNet
 from torch.utils.data import DataLoader, TensorDataset
 
 from flowerclient import FlowerClient
@@ -224,7 +224,7 @@ class PBFTClient:
             # Extract model path and hash
             model_path = model_info.get('model_path')
             expected_hash = model_info.get('model_hash')
-            architecture = model_info.get('architecture', 'mobilenet_v2')
+            architecture = model_info.get('architecture', 'simple_mnist_cnn')
             
             # Get the global model version - THIS IS IMPORTANT
             global_model_version_used = model_info.get('version', 1) # Store the version
@@ -250,7 +250,7 @@ class PBFTClient:
             
             # Evaluate the global model before training
             self.logger.info("Evaluating global model before training")
-            pre_train_loss, pre_train_accuracy = self.evaluate_model(model_path)
+            pre_train_loss, pre_train_accuracy = self.evaluate_model(model_path=model_path, architecture=architecture)
             
             print("Step 1: Loading model architecture...")            
             # Force CPU usage to avoid MPS bus errors
@@ -258,7 +258,13 @@ class PBFTClient:
             print("Using CPU device for training (avoiding MPS due to stability issues)")
             
             # Initialize model
-            model = Net(num_classes=10, arch=architecture).to(device)
+            if architecture == 'simple_mnist_cnn':
+                 model = SimpleMNISTNet(num_classes=10).to(device)
+            elif architecture == 'mobilenet_v2':
+                 model = Net(num_classes=10, arch=architecture).to(device)
+            else:
+                 self.logger.error(f"Unknown architecture '{architecture}' during training init.")
+                 return None, None, None, None
             
             print("Step 2: Loading model weights...")
             # Load the model weights based on file extension
@@ -370,7 +376,7 @@ class PBFTClient:
 
                 # Evaluate the model after training
                 self.logger.info("Evaluating model after training")
-                post_train_loss, post_train_accuracy = self.evaluate_model(model=model)
+                post_train_loss, post_train_accuracy = self.evaluate_model(model=model, architecture=architecture)
                 
                 # Log improvement
                 if pre_train_accuracy is not None and post_train_accuracy is not None:
@@ -491,12 +497,13 @@ class PBFTClient:
             self.logger.error(f"Failed to send model update v{global_model_version} to any node")
             return False
 
-    def evaluate_model(self, model_path=None, model=None):
+    def evaluate_model(self, model_path=None, model=None, architecture=None):
         """Evaluate the model on the test dataset
         
         Args:
             model_path: Path to the model file (.pt or .npz)
             model: PyTorch model object (if already loaded)
+            architecture: String identifier for the model architecture (e.g., 'simple_mnist_cnn')
         """
         self.logger.info("Evaluating model performance")
         
@@ -507,19 +514,36 @@ class PBFTClient:
             
             # If model is not provided, load it from path
             if model is None and model_path is not None:
-                # Initialize the model architecture
-                architecture = 'mobilenet_v2'  # Default architecture
-                
-                # Check if it's an NPZ file
+                # Determine architecture: use parameter, then check checkpoint, then default
+                if architecture is None and model_path.endswith('.pt'):
+                    try:
+                        checkpoint = torch.load(model_path, map_location=device)
+                        architecture = checkpoint.get('architecture')
+                    except Exception:
+                        pass # Ignore error if checkpoint doesn't contain architecture
+
+                if architecture is None:
+                    architecture = 'simple_mnist_cnn' # <<< CHANGED default if not provided/found
+                    self.logger.info(f"Architecture not provided, defaulting to {architecture}")
+                else:
+                    self.logger.info(f"Using architecture: {architecture}")
+
+                # --- Instantiate model based on architecture string ---
+                if architecture == 'simple_mnist_cnn':
+                     model_to_eval = SimpleMNISTNet(num_classes=10).to(device) # <<< USE NEW MODEL CLASS
+                elif architecture == 'mobilenet_v2': # Keep old logic if needed
+                     model_to_eval = Net(num_classes=10, arch=architecture).to(device)
+                else:
+                     self.logger.error(f"Unknown architecture '{architecture}' during evaluation init.")
+                     return None, None # Fail evaluation
+                # --- End Instantiate ---
+
+                # Load weights into the correctly instantiated model
                 if model_path.endswith('.npz'):
-                    self.logger.info(f"Loading NPZ model from {model_path}")
-                    # Load the NPZ file
+                    # Load NPZ file
                     npz_data = np.load(model_path, allow_pickle=True)
                     
-                    # Initialize model
-                    model = Net(num_classes=10, arch=architecture).to(device)
-                    
-                    # Convert numpy arrays to PyTorch tensors and load into model
+                    # Convert numpy arrays to PyTorch tensors and load into model_to_eval
                     state_dict = {}
                     for key in npz_data.files:
                         # Skip any non-tensor metadata that might be in the file
@@ -532,7 +556,7 @@ class PBFTClient:
                     # Check if we have a valid state dict
                     if state_dict:
                         try:
-                            model.load_state_dict(state_dict)
+                            model_to_eval.load_state_dict(state_dict)
                             self.logger.info("Successfully loaded model weights from NPZ")
                         except Exception as e:
                             self.logger.error(f"Error loading state dict: {e}")
@@ -551,11 +575,11 @@ class PBFTClient:
                         architecture = checkpoint['architecture']
                     
                     # Initialize model
-                    model = Net(num_classes=10, arch=architecture).to(device)
+                    model_to_eval = SimpleMNISTNet(num_classes=10).to(device)
                     
                     # Load weights
                     if 'model_state_dict' in checkpoint:
-                        model.load_state_dict(checkpoint['model_state_dict'])
+                        model_to_eval.load_state_dict(checkpoint['model_state_dict'])
                         self.logger.info("Successfully loaded model weights from PT")
                     else:
                         self.logger.warning("No model_state_dict found in checkpoint")
@@ -565,7 +589,7 @@ class PBFTClient:
                     return None, None
             
             # Set model to evaluation mode
-            model.eval()
+            model_to_eval.eval()
             
             # Define loss function
             criterion = nn.CrossEntropyLoss()
@@ -586,7 +610,7 @@ class PBFTClient:
                 total = 0
                 
                 for inputs, labels in test_loader:
-                    outputs = model(inputs)
+                    outputs = model_to_eval(inputs)
                     loss = criterion(outputs, labels)
                     
                     total_loss += loss.item() * inputs.size(0)
@@ -605,7 +629,7 @@ class PBFTClient:
                 class_total = [0] * 10
                 
                 for inputs, labels in test_loader:
-                    outputs = model(inputs)
+                    outputs = model_to_eval(inputs)
                     _, predicted = torch.max(outputs.data, 1)
                     
                     for i in range(len(labels)):

@@ -3,11 +3,17 @@ import threading
 import random
 import logging
 import json
+# Add necessary imports for MNIST
+import torch
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader, Subset # Added Subset
+
 from pbft_node import PBFTNode
 from pbft_client import PBFTClient
 
 from going_modular.utils import initialize_parameters
-from going_modular.data_setup import load_dataset
+# We might not use load_dataset from data_setup anymore
+# from going_modular.data_setup import load_dataset
 from config import settings
 
 import ssl
@@ -178,22 +184,95 @@ def add_new_node(nodes, next_node_id, test_set, host='127.0.0.1', base_port=8000
 
 def main():
     logging.basicConfig(level=logging.DEBUG)
-    training_barrier, length = initialize_parameters(settings)
-
-    print(training_barrier, length)
+    # We might not need training_barrier, length from initialize_parameters
+    # training_barrier, length = initialize_parameters(settings)
+    # print(training_barrier, length)
 
     num_nodes = settings['number_of_nodes']
-    num_clients = 9 # UPDATED: Use 9 clients
+    num_clients = 9
     base_port = 10000
 
-    (client_train_sets, client_test_sets, node_test_sets, list_classes) = load_dataset(length, settings['name_dataset'],
-                                                                                    settings['data_root'],
-                                                                                    num_clients, # Pass the updated count
-                                                                                    settings['number_of_nodes'])
+    # --- MNIST Data Loading ---
+    logger.info("Loading MNIST dataset...")
+    mnist_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,)) # MNIST specific normalization
+    ])
+
+    try:
+        # Use data_root from settings for consistency
+        data_root = settings.get('data_root', './data') # Default to ./data if not set
+        os.makedirs(data_root, exist_ok=True) # Ensure data root exists
+        full_train_dataset = datasets.MNIST(root=data_root, train=True, download=True, transform=mnist_transform)
+        full_test_dataset = datasets.MNIST(root=data_root, train=False, download=True, transform=mnist_transform)
+        logger.info(f"MNIST loaded: {len(full_train_dataset)} train, {len(full_test_dataset)} test images.")
+    except Exception as e:
+        logger.error(f"Failed to download or load MNIST dataset: {e}")
+        logger.error("Please check your internet connection and data_root path in config.")
+        return
+
+    # --- Simple Data Splitting (Non-IID Example) ---
+    # Creates disjoint subsets for each client/node. Replace with more sophisticated splitting if needed.
+    client_train_sets = []
+    client_test_sets = []
+    node_test_sets = []
+
+    train_indices = list(range(len(full_train_dataset)))
+    test_indices = list(range(len(full_test_dataset)))
+    random.shuffle(train_indices)
+    random.shuffle(test_indices)
+
+    samples_per_client_train = len(train_indices) // num_clients
+    samples_per_client_test = len(test_indices) // num_clients
+    samples_per_node_test = len(test_indices) // num_nodes # Simple split for nodes
+
+    logger.info(f"Splitting data: ~{samples_per_client_train} train/client, ~{samples_per_client_test} test/client, ~{samples_per_node_test} test/node")
+
+    all_train_data = []
+    all_test_data = []
+    for i in range(num_clients):
+        start_idx = i * samples_per_client_train
+        end_idx = start_idx + samples_per_client_train if i < num_clients - 1 else len(train_indices) # Handle remainder
+        client_train_subset_indices = train_indices[start_idx:end_idx]
+        # It's often better to pass indices or Subsets to clients if they handle DataLoader internally
+        # But PBFTClient currently expects tensors, so we load them here. This can be memory intensive.
+        client_train_subset = Subset(full_train_dataset, client_train_subset_indices)
+        # Load all data from subset into memory (adjust batch_size if memory becomes an issue)
+        temp_loader = DataLoader(client_train_subset, batch_size=len(client_train_subset))
+        x_train_client, y_train_client = next(iter(temp_loader))
+        client_train_sets.append((x_train_client, y_train_client))
+        all_train_data.append(len(client_train_subset_indices))
+
+
+        start_idx = i * samples_per_client_test
+        end_idx = start_idx + samples_per_client_test if i < num_clients - 1 else len(test_indices) # Handle remainder
+        client_test_subset_indices = test_indices[start_idx:end_idx]
+        client_test_subset = Subset(full_test_dataset, client_test_subset_indices)
+        temp_loader = DataLoader(client_test_subset, batch_size=len(client_test_subset))
+        x_test_client, y_test_client = next(iter(temp_loader))
+        client_test_sets.append((x_test_client, y_test_client))
+        all_test_data.append(len(client_test_subset_indices))
+
+    # Create Node Test sets
+    current_test_idx = 0
+    for i in range(num_nodes):
+        num_samples = samples_per_node_test
+        if i == num_nodes - 1: # Give remainder to last node
+             num_samples = len(test_indices) - current_test_idx
+        end_idx = current_test_idx + num_samples
+        node_test_subset_indices = test_indices[current_test_idx:end_idx]
+        node_test_subset = Subset(full_test_dataset, node_test_subset_indices)
+        temp_loader = DataLoader(node_test_subset, batch_size=len(node_test_subset))
+        x_test_node, y_test_node = next(iter(temp_loader))
+        node_test_sets.append((x_test_node, y_test_node))
+        current_test_idx = end_idx
+
+    logger.info(f"Data split: Train sizes={all_train_data}, Test sizes={all_test_data}")
+    # --- End MNIST Data Loading & Splitting ---
 
     # Ensure we have enough data splits
-    if len(client_train_sets) < num_clients or len(client_test_sets) < num_clients:
-        logger.error(f"Insufficient data splits loaded ({len(client_train_sets)} train, {len(client_test_sets)} test) for {num_clients} clients.")
+    if len(client_train_sets) < num_clients or len(client_test_sets) < num_clients or len(node_test_sets) < num_nodes:
+        logger.error(f"Insufficient data splits after processing MNIST.")
         return
 
     nodes_config = []
@@ -207,36 +286,33 @@ def main():
     # Start nodes
     nodes = []
     for i in range(num_nodes):
-        # Ensure node_test_sets has enough entries if needed, reusing [0] might be okay for simulation
-        test_set_index = i if i < len(node_test_sets) else 0
         node = PBFTNode(
             node_id=i,
             host='localhost',
             port=base_port + i,
             nodes_config=nodes_config,
-            test_set=node_test_sets[test_set_index] # Use appropriate test set
+            test_set=node_test_sets[i] # Pass the split node test set
         )
         nodes.append(node)
         logger.info(f"Started node {i} on port {base_port + i}")
     
     # Give nodes time to start AND for the primary to create the initial global model
     logger.info("Waiting for nodes to start and initial global model creation (v1)...")
-    time.sleep(5) # Increased from 2 to 5 seconds
+    time.sleep(5)
     logger.info("Initial wait finished.")
     
     # Create clients
     clients = []
-    # Assuming data loader provides enough sets for num_clients
     for i in range(num_clients):
-        # Use smaller data slices for quicker simulation if needed
-        train_data_slice = client_train_sets[i][:100] # Example: Use first 100 samples
-        test_data_slice = client_test_sets[i][:100]  # Example: Use first 100 samples
-        logger.info(f"Client {i} using {len(train_data_slice)} training samples and {len(test_data_slice)} test samples.")
+        # Use the pre-loaded tensors
+        train_data_tensors = client_train_sets[i]
+        test_data_tensors = client_test_sets[i]
+        logger.info(f"Client {i} using {len(train_data_tensors[0])} training samples and {len(test_data_tensors[0])} test samples.")
         client = PBFTClient(
-            client_id=f"client{i}",
+            client_id=f"client{i}", 
             nodes_config=nodes_config,
-            client_train_set=train_data_slice,
-            client_test_set=test_data_slice
+            client_train_set=train_data_tensors,
+            client_test_set=test_data_tensors
             )
         clients.append(client)
     logger.info(f"Created {len(clients)} clients.")
@@ -258,8 +334,8 @@ def main():
     
     try:
         next_node_id = num_nodes
-        cluster_size = 3 # Define cluster size
-        last_processed_global_model_version = 0 # Track the last version we triggered training for
+        cluster_size = 3
+        last_processed_global_model_version = 0
 
         # --- Helper Function for Cluster Training ---
         def run_cluster_training(cluster_clients, cluster_id, base_global_model_version):
@@ -371,11 +447,11 @@ def main():
             print("10. Add a new node to the network")
             print("11. Simulate selective censorship")
             print("12. Train clients (Individual) - Note: Uses client 0") # Clarified which client
-            print("13. Check for New Model & Trigger Cluster Training") # MODIFIED/NEW option
-            print("14. Exit") # Renumber Exit
-
+            print("13. Check for New Model & Trigger Random Cluster Training") # Updated description
+            print("14. Exit")
+            
             choice = input(f"Enter your choice (1-14): ")
-
+            
             if choice == '1':
                 operation_type = input("Enter operation type (SET/GET/DELETE): ").upper()
                 if operation_type in ["SET", "GET", "DELETE"]:
@@ -647,7 +723,7 @@ def main():
             
             elif choice == '13': # Check for new model and trigger training
                 logger.info("Checking for new global model version...")
-                current_global_model_version = -1 # Default to invalid version
+                current_global_model_version = -1
                 try:
                     # Query node 0's state for the global model info
                     # Ensure node 0 is running before querying
@@ -675,23 +751,32 @@ def main():
                                 f"(previously processed v{last_processed_global_model_version}). Triggering cluster training.")
                     last_processed_global_model_version = current_global_model_version
 
+                    # --- Randomize Client Order for Cluster Formation ---
+                    logger.info("Shuffling clients for random cluster formation...")
+                    clients_copy = clients[:] # Create a copy to shuffle
+                    random.shuffle(clients_copy)
+                    logger.debug(f"Shuffled client order: {[c.client_id for c in clients_copy]}")
+                    # --- End Randomization ---
+
                     # Trigger training for all clusters based on this new version
-                    num_clusters = len(clients) // cluster_size
+                    num_clusters = len(clients_copy) // cluster_size # Use the shuffled list length
                     logger.info(f"Attempting to train {num_clusters} clusters of size {cluster_size}.")
                     for i in range(num_clusters):
                         start_index = i * cluster_size
                         end_index = start_index + cluster_size
-                        cluster_clients_for_run = clients[start_index:end_index] # Use a different var name
+                        # Use the shuffled list for slicing
+                        cluster_clients_for_run = clients_copy[start_index:end_index]
 
                         if len(cluster_clients_for_run) == cluster_size:
-                             # Run training for this cluster sequentially for simplicity
-                             logger.info(f"--- Starting run_cluster_training for Cluster {i} ---")
+                             # Run training for this cluster sequentially
+                             logger.info(f"--- Starting run_cluster_training for Cluster {i} (Clients: {[c.client_id for c in cluster_clients_for_run]}) ---")
                              run_cluster_training(cluster_clients_for_run,
                                                   cluster_id=i,
                                                   base_global_model_version=current_global_model_version)
                              logger.info(f"--- Finished run_cluster_training for Cluster {i} ---")
                              time.sleep(1) # Small delay between starting clusters
                         else:
+                             # This condition might be less likely if num_clients is a multiple of cluster_size
                              logger.warning(f"Could not form cluster {i}, only {len(cluster_clients_for_run)} clients available in slice [{start_index}:{end_index}].")
 
                     logger.info(f"All cluster training rounds initiated for global model v{current_global_model_version}.")
@@ -707,7 +792,7 @@ def main():
             else:
                 # Adjust the invalid choice message
                 print(f"Invalid choice. Please enter a number between 1 and 14.")
-
+    
     except KeyboardInterrupt:
         pass
     finally:

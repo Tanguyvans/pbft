@@ -54,18 +54,28 @@ class FlowerClient(fl.client.NumPyClient):
     def node(cls, x_test, y_test, batch_size=10):
         obj = cls(batch_size=batch_size)
         # Set data loaders
-        test_data = TensorDataset(torch.stack(x_test), torch.tensor(y_test))
+        try:
+            # Ensure y_test is a tensor (it should be, but extra check)
+            if not isinstance(y_test, torch.Tensor):
+                 y_test = torch.tensor(y_test)
+            # Remove the torch.stack call around x_test
+            test_data = TensorDataset(x_test, y_test)
+            test_loader = DataLoader(test_data, batch_size=batch_size)
+        except Exception as e:
+            print(f"Error creating test TensorDataset/DataLoader in FlowerClient.node: {e}")
+            # Handle error appropriately, maybe return None or raise
+            test_loader = None
 
-        obj.test_loader = DataLoader(dataset=test_data, batch_size=batch_size, shuffle=True, drop_last=True)
+        obj.test_loader = test_loader
         return obj
 
     @classmethod
     def client(cls, x_train, y_train, x_val, y_val, x_test, y_test, batch_size=10):
         obj = cls(batch_size=batch_size)
         # Set data loaders
-        train_data = TensorDataset(torch.stack(x_train), torch.tensor(y_train))
-        val_data = TensorDataset(torch.stack(x_val), torch.tensor(y_val))
-        test_data = TensorDataset(torch.stack(x_test), torch.tensor(y_test))
+        train_data = TensorDataset(x_train, y_train)
+        val_data = TensorDataset(x_val, y_val)
+        test_data = TensorDataset(x_test, y_test)
 
         obj.len_train = len(y_train)
         obj.train_loader = DataLoader(dataset=train_data, batch_size=batch_size, shuffle=True, drop_last=True)
