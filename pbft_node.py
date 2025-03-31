@@ -685,25 +685,52 @@ class PBFTNode:
                     if self.pbft.is_primary_node():
                         self.logger.info(f"Primary node creating block for {block_id}")
                     
-                    new_block = self.blockchain.create_block(
-                        data={
+                    # --- Prepare data for the block ---
+                    block_data = {
                             'operation': operation,
                             'sequence': sequence,
                             'view': view,
                             'block_id': block_id,
                             'request_id': request_id,
                             'result': result,
-                            # Include state snapshot only for simple ops, or specific parts for complex ops
-                            'state_snapshot': self.state.copy() if not operation.startswith('CLUSTER_') else { 'cluster_validations': self.state.get('cluster_validations', {}).copy() }
-                        },
-                        model_type="cluster-validation-request" if operation.startswith('CLUSTER_') else "key-value-operation",
+                    }
+
+                    # --- Conditionally add specific data and state snapshots ---
+                    if operation.startswith('CLUSTER_TRAIN_VALIDATE '):
+                        # Add the list of client IDs that formed this cluster
+                        if 'client_ids_list' in locals() and client_ids_list is not None:
+                            block_data['cluster_client_ids'] = client_ids_list
+                            self.logger.debug(f"Adding client IDs to block {block_id}: {client_ids_list}")
+                        else:
+                            # This case shouldn't happen if parsing worked, but good to handle
+                            self.logger.warning(f"Could not find client_ids_list when creating block for {block_id}, adding empty list.")
+                            block_data['cluster_client_ids'] = []
+                        # Include only the relevant part of the state for clusters
+                        block_data['state_snapshot'] = { 'cluster_validations': self.state.get('cluster_validations', {}).copy() }
+                        block_model_type = "cluster-validation-request"
+                    elif operation.startswith('UPDATE_MODEL '):
+                        # Potentially add model update specific info if needed later
+                        block_data['state_snapshot'] = self.state.copy() # Or specific parts if state grows large
+                        block_model_type = "model-update"
+                    elif operation == 'CREATE_GLOBAL_MODEL' or operation.startswith('UPDATE_GLOBAL_MODEL '):
+                        block_data['state_snapshot'] = {'global_model': self.state.get('global_model')} # Only global model info
+                        block_model_type = "global-model-creation-or-update"
+                    else: # Default for SET/GET/DELETE etc.
+                        block_data['state_snapshot'] = self.state.copy() # Full state snapshot
+                        block_model_type = "key-value-operation"
+
+
+                    # --- Create the block ---
+                    new_block = self.blockchain.create_block(
+                        data=block_data, # Use the prepared data dictionary
+                        model_type=block_model_type,
                         storage_reference=f"op-{block_id}",
-                        calculated_hash=hashlib.sha256(str(self.state).encode()).hexdigest(),
+                        calculated_hash=hashlib.sha256(json.dumps(block_data, sort_keys=True).encode()).hexdigest(), # Hash the actual block data
                         participants=[str(self.node_id)]
                     )
                     self.blockchain.add_block(new_block)
                     self.logger.info(f"Created block #{new_block.index} for {block_id}, hash: {new_block.current_hash[:10]}...")
-                    
+
                     # If this node is the primary, broadcast the new block to all nodes
                     if self.pbft.is_primary_node():
                         self.logger.info(f"Broadcasting block #{new_block.index} to all nodes")

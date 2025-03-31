@@ -1,0 +1,72 @@
+================
+Index:		 0
+Timestamp:	 1000000000
+Data:		 {'message': 'Genesis Block'}
+Model Type:	 genesis
+Storage Ref:	 
+Calc Hash:	 
+Participants:	 ['system']
+Previous Hash:	 
+Current Hash:	 c6f5b192928503b5792eb86314e01fdadc880c641ddc49a0adde5778e1c9ce7b
+Nonce:		 0
+
+================
+Index:		 1
+Timestamp:	 1743445844.277395
+Data:		 {'operation': 'CREATE_GLOBAL_MODEL', 'sequence': 1, 'view': 0, 'block_id': 'v0-s1', 'request_id': '', 'result': 'GLOBAL_MODEL_CREATED', 'state_snapshot': {'global_model': '{"type": "initial_model", "version": 1, "created_by": "node-0", "timestamp": 1743445843, "storage_path": "models/npz/global_model_v1_1743445843.npz", "hash": "6718a27f4526256c30f95dc54259274c89b607978bf2379d1434b059f345f1e3", "architecture": "mobilenet_v2", "num_classes": 10}'}}
+Model Type:	 global-model-creation-or-update
+Storage Ref:	 op-v0-s1
+Calc Hash:	 abcb807c43e1b65c202d04077f88d4566b2a30ba09f988fc23d2f4f8b0facdd5
+Participants:	 ['0']
+Previous Hash:	 c6f5b192928503b5792eb86314e01fdadc880c641ddc49a0adde5778e1c9ce7b
+Current Hash:	 00d1be9ceddf3acccfacb3c9d59c709bb4fc0406b14ef2fe9c0513c2c5b32437
+Nonce:		 44
+
+================
+Index:		 2
+Timestamp:	 1743446755.6910589
+Data:		 {'operation': 'CLUSTER_TRAIN_VALIDATE cluster_id=0 aggregated_model_path=\'models/aggregated/cluster_0_v1_aggregated_1743446755.npz\' aggregated_model_hash=\'bdc30528afac6726b2784504ffa57015bf94fa905e7d8dd5e8fa3527930b0836\' client_ids=\'["client0", "client1", "client2"]\' global_model_version=1', 'sequence': 2, 'view': 0, 'block_id': 'v0-s2', 'request_id': '', 'result': 'CLUSTER_VALIDATED: cluster_id=0, added to pending aggregation v1', 'cluster_client_ids': ['client0', 'client1', 'client2'], 'state_snapshot': {'cluster_validations': {'cluster_0_seq_2': {'status': 'VALIDATED', 'aggregated_model_path': 'models/aggregated/cluster_0_v1_aggregated_1743446755.npz', 'aggregated_model_hash': 'bdc30528afac6726b2784504ffa57015bf94fa905e7d8dd5e8fa3527930b0836', 'client_ids': ['client0', 'client1', 'client2'], 'based_on_version': 1, 'timestamp': 1743446755.690976}}}}
+Model Type:	 cluster-validation-request
+Storage Ref:	 op-v0-s2
+Calc Hash:	 e3da104dbffee3dcac967e934c8252253b2c4e549695b8ea4ea964f560e26d4c
+Participants:	 ['0']
+Previous Hash:	 00d1be9ceddf3acccfacb3c9d59c709bb4fc0406b14ef2fe9c0513c2c5b32437
+Current Hash:	 008fa3f818d6a092a93a71d5ec84c6fb1cfff6ca74b736465da0e5e17699e5f7
+Nonce:		 110
+
+================
+Index:		 3
+Timestamp:	 1743447528.638908
+Data:		 {'operation': 'CLUSTER_TRAIN_VALIDATE cluster_id=1 aggregated_model_path=\'models/aggregated/cluster_1_v1_aggregated_1743447528.npz\' aggregated_model_hash=\'fbeaa6d65df1df92220f21a72a9e56b81d7ec08eeb8a5ae0fd9105b8e73497d8\' client_ids=\'["client3", "client4", "client5"]\' global_model_version=1', 'sequence': 3, 'view': 0, 'block_id': 'v0-s3', 'request_id': '', 'result': 'CLUSTER_VALIDATED: cluster_id=1, added to pending aggregation v1', 'cluster_client_ids': ['client3', 'client4', 'client5'], 'state_snapshot': {'cluster_validations': {'cluster_0_seq_2': {'status': 'VALIDATED', 'aggregated_model_path': 'models/aggregated/cluster_0_v1_aggregated_1743446755.npz', 'aggregated_model_hash': 'bdc30528afac6726b2784504ffa57015bf94fa905e7d8dd5e8fa3527930b0836', 'client_ids': ['client0', 'client1', 'client2'], 'based_on_version': 1, 'timestamp': 1743446755.690976}, 'cluster_1_seq_3': {'status': 'VALIDATED', 'aggregated_model_path': 'models/aggregated/cluster_1_v1_aggregated_1743447528.npz', 'aggregated_model_hash': 'fbeaa6d65df1df92220f21a72a9e56b81d7ec08eeb8a5ae0fd9105b8e73497d8', 'client_ids': ['client3', 'client4', 'client5'], 'based_on_version': 1, 'timestamp': 1743447528.638824}}}}
+Model Type:	 cluster-validation-request
+Storage Ref:	 op-v0-s3
+Calc Hash:	 b1adeb67c11129dc8a852114e0ef6b332ce49e2df5d1f31873bd0b1895822409
+Participants:	 ['0']
+Previous Hash:	 008fa3f818d6a092a93a71d5ec84c6fb1cfff6ca74b736465da0e5e17699e5f7
+Current Hash:	 008b6edc181d353c0f77844588477977e8806043cb8d24e21b000d33a617023d
+Nonce:		 236
+
+================
+Index:		 4
+Timestamp:	 1743448466.8585548
+Data:		 {'operation': 'CLUSTER_TRAIN_VALIDATE cluster_id=2 aggregated_model_path=\'models/aggregated/cluster_2_v1_aggregated_1743448466.npz\' aggregated_model_hash=\'3b8799039c25458377821c1923a7a91ce4a37900b2da1556a1d0731b42d799b0\' client_ids=\'["client6", "client7", "client8"]\' global_model_version=1', 'sequence': 4, 'view': 0, 'block_id': 'v0-s4', 'request_id': '', 'result': 'CLUSTER_VALIDATED: cluster_id=2, added to pending aggregation v1', 'cluster_client_ids': ['client6', 'client7', 'client8'], 'state_snapshot': {'cluster_validations': {'cluster_0_seq_2': {'status': 'VALIDATED', 'aggregated_model_path': 'models/aggregated/cluster_0_v1_aggregated_1743446755.npz', 'aggregated_model_hash': 'bdc30528afac6726b2784504ffa57015bf94fa905e7d8dd5e8fa3527930b0836', 'client_ids': ['client0', 'client1', 'client2'], 'based_on_version': 1, 'timestamp': 1743446755.690976}, 'cluster_1_seq_3': {'status': 'VALIDATED', 'aggregated_model_path': 'models/aggregated/cluster_1_v1_aggregated_1743447528.npz', 'aggregated_model_hash': 'fbeaa6d65df1df92220f21a72a9e56b81d7ec08eeb8a5ae0fd9105b8e73497d8', 'client_ids': ['client3', 'client4', 'client5'], 'based_on_version': 1, 'timestamp': 1743447528.638824}, 'cluster_2_seq_4': {'status': 'VALIDATED', 'aggregated_model_path': 'models/aggregated/cluster_2_v1_aggregated_1743448466.npz', 'aggregated_model_hash': '3b8799039c25458377821c1923a7a91ce4a37900b2da1556a1d0731b42d799b0', 'client_ids': ['client6', 'client7', 'client8'], 'based_on_version': 1, 'timestamp': 1743448466.858216}}}}
+Model Type:	 cluster-validation-request
+Storage Ref:	 op-v0-s4
+Calc Hash:	 34c404119cb7e69ea3df4dd8c91a3683a0e50c57d9fefad076b07c05ba7c5da6
+Participants:	 ['0']
+Previous Hash:	 008b6edc181d353c0f77844588477977e8806043cb8d24e21b000d33a617023d
+Current Hash:	 00de8343a006fbd5706cb040dd6f41f53df1be9bb760572934deb0eeda665335
+Nonce:		 498
+
+================
+Index:		 5
+Timestamp:	 1743448466.974102
+Data:		 {'operation': 'UPDATE_GLOBAL_MODEL models/npz/global_model_v2_1743448466.npz d99f363a426dfb40ff142e7af92d075690aa57e4a8185ff44f5f4a7842b0a03a 2', 'sequence': 5, 'view': 0, 'block_id': 'v0-s5', 'request_id': '', 'result': 'GLOBAL_MODEL_UPDATED: version 2', 'state_snapshot': {'global_model': '{"type": "aggregated_model", "version": 2, "created_by": "node-0", "timestamp": 1743448466, "storage_path": "models/npz/global_model_v2_1743448466.npz", "hash": "d99f363a426dfb40ff142e7af92d075690aa57e4a8185ff44f5f4a7842b0a03a", "architecture": "mobilenet_v2", "num_classes": 10}'}}
+Model Type:	 global-model-creation-or-update
+Storage Ref:	 op-v0-s5
+Calc Hash:	 8a7c117208112da8415324c3d169b34d75be79aaaf91a4c479c96e573bfc3151
+Participants:	 ['0']
+Previous Hash:	 00de8343a006fbd5706cb040dd6f41f53df1be9bb760572934deb0eeda665335
+Current Hash:	 00facf12f04696e8b9960a234fe8f65ce52df8e84ceab20ecaa954bf61fdccca
+Nonce:		 127
+
