@@ -183,7 +183,7 @@ def main():
     print(training_barrier, length)
 
     num_nodes = settings['number_of_nodes']
-    num_clients = 9 # UPDATED: Use 9 clients
+    num_clients = 24 # UPDATED: Use 9 clients
     base_port = 10000
 
     (client_train_sets, client_test_sets, node_test_sets, list_classes) = load_dataset(length, settings['name_dataset'],

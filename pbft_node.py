@@ -20,6 +20,8 @@ from blockchain import Blockchain
 from block import Block
 from pbft import PBFT
 
+from components.message_handler import MessageHandler
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 class PBFTNode:
@@ -58,9 +60,11 @@ class PBFTNode:
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(10)
+
+        self.message_handler = MessageHandler(self, self.server_socket)
         
         self.running = True
-        self.server_thread = threading.Thread(target=self.start_server)
+        self.server_thread = threading.Thread(target=self.message_handler.start_server)
         self.server_thread.daemon = True
         self.server_thread.start()
         
@@ -75,7 +79,7 @@ class PBFTNode:
         if self.pbft.is_primary_node():
             def delayed_initial_model():
                 # Create second genesis block with initial global model
-                self.logger.info(f"Primary node {self.node_id} creating initial global model")
+
                 
                 # Store request in PBFT module with proper digest
                 request_id = "initial_global_model"
@@ -92,7 +96,7 @@ class PBFTNode:
                 }
                 
                 # First make sure all nodes are aware of this request
-                self.broadcast(request)
+                self.message_handler.broadcast(request)
                 self.pbft.start_consensus(request_id)
                 
                 self.logger.info(f"Primary status: {self.node_id} is the primary node")
@@ -107,68 +111,17 @@ class PBFTNode:
         self.pending_updates = []  # List of validated updates since last aggregation
         self.global_model_version = 1  # Current global model version
     
-    def start_server(self):
-        """Accept incoming connections and handle them in separate threads"""
-        while self.running:
-            try:
-                client_socket, addr = self.server_socket.accept()
-                client_thread = threading.Thread(target=self.handle_client, args=(client_socket, addr))
-                client_thread.daemon = True
-                client_thread.start()
-            except Exception as e:
-                self.logger.error(f"Error accepting connection: {e}")
-                if not self.running:
-                    break
-    
-    def handle_client(self, client_socket, addr):
-        """Handle incoming messages from clients or other nodes"""
-        try:
-            data = b""
-            while self.running:
-                chunk = client_socket.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-                try:
-                    # Try to parse the message
-                    message = json.loads(data.decode('utf-8'))
-                    self.process_message(message)
-                    data = b""
-                except json.JSONDecodeError:
-                    # Incomplete message, continue receiving
-                    continue
+    def create_initial_global_model(self):
+        self.logger.info(f"Primary node {self.node_id} creating initial global model")
+
+        try: 
+            pass
+
         except Exception as e:
-            self.logger.error(f"Error handling client {addr}: {e}")
-        finally:
-            client_socket.close()
-    
-    def send_message(self, target_node: Dict, message: Dict):
-        """Send a message to a specific node"""
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(2.0)  # Set a timeout for connection attempts
-            s.connect((target_node['host'], target_node['port']))
-            s.sendall(json.dumps(message).encode('utf-8'))
-            s.close()
-        except ConnectionRefusedError:
-            # More concise error for expected failures
-            if not hasattr(self, 'failed_nodes'):
-                self.failed_nodes = set()
-            
-            # Only log the first time we detect a node is down
-            if target_node['id'] not in self.failed_nodes:
-                self.logger.warning(f"Node {target_node['id']} appears to be down")
-                self.failed_nodes.add(target_node['id'])
-        except Exception as e:
-            self.logger.error(f"Error sending message to {target_node['id']}: {e}")
-    
-    def broadcast(self, message: Dict, exclude_self=False):
-        """Broadcast a message to all nodes"""
-        for node in self.nodes:
-            if exclude_self and node['id'] == self.node_id:
-                continue
-            self.send_message(node, message)
-    
+            self.logger.error(f"Error creating initial global model: {e}")
+            traceback.print_exc()
+            return None
+
     def process_message(self, message: Dict):
         """Process incoming messages based on their type"""
         msg_type = message.get('type')
@@ -741,7 +694,7 @@ class PBFTNode:
                             'sequence': sequence,
                             'view': view
                         }
-                        self.broadcast(block_sync)
+                        self.message_handler.broadcast(block_sync)
         
         self.logger.info(f"Current state: {self.state}")
         return result
@@ -904,13 +857,6 @@ class PBFTNode:
         with self.blockchain_lock:
             return self.blockchain
     
-    def stop(self):
-        """Stop the node"""
-        self.running = False
-        self.pbft.cleanup()  # Clean up PBFT timers
-        self.server_socket.close()
-        self.logger.info(f"Node {self.node_id} stopped")
-    
     def on_consensus_reached(self, sequence: int, request: Dict):
         """Called by PBFT when consensus is reached for a request"""
         request_id = request.get('request_id', '')
@@ -963,7 +909,7 @@ class PBFTNode:
                 'view': self.pbft.view,
                 'primary': self.pbft.view % len(self.nodes)
             }
-            self.send_message(new_node, view_sync)
+            self.message_handler.send_message(new_node, view_sync)
             
             # Then sync all blocks
             for block in self.blockchain.blocks:
@@ -974,7 +920,7 @@ class PBFTNode:
                     'sequence': block.index,
                     'view': self.pbft.view  # Include current view
                 }
-                self.send_message(new_node, block_sync)
+                self.message_handler.send_message(new_node, block_sync)
             
             # Sync state
             state_sync = {
@@ -983,7 +929,7 @@ class PBFTNode:
                 'state': self.state,
                 'last_executed_seq': self.last_executed_seq
             }
-            self.send_message(new_node, state_sync)
+            self.message_handler.send_message(new_node, state_sync)
             
             self.logger.info(f"Blockchain and state sync to node {node_id} completed")
 
@@ -1012,7 +958,7 @@ class PBFTNode:
                 'sender': self.node_id,
                 'view': view
             }
-            self.broadcast(join_msg)
+            self.message_handler.broadcast(join_msg)
 
     def handle_state_sync(self, message: Dict):
         """Handle state synchronization from another node"""
@@ -1068,7 +1014,7 @@ class PBFTNode:
                     'last_executed_seq': self.last_executed_seq,
                     'view': self.pbft.view
                 }
-                self.send_message(target_node, state_sync)
+                self.message_handler.send_message(target_node, state_sync)
                 
                 # Send all blocks
                 for block in self.blockchain.blocks:
@@ -1079,7 +1025,7 @@ class PBFTNode:
                         'sequence': block.index,
                         'view': self.pbft.view
                     }
-                    self.send_message(target_node, block_sync)
+                    self.message_handler.send_message(target_node, block_sync)
                 
                 self.logger.info(f"Sent state and blockchain to new node {sender}")
 
@@ -1252,7 +1198,7 @@ class PBFTNode:
                 
                 self.pbft.in_view_change = True
                 self.pbft.process_message(view_change_msg)
-                self.broadcast(view_change_msg)
+                self.message_handler.broadcast(view_change_msg)
                 self.logger.warning(f"Initiated view change to view {new_view} due to selective censorship")
 
     def create_primary_block(self, data, model_type="primary-created"):
@@ -1285,7 +1231,7 @@ class PBFTNode:
                 'sequence': 0,  # Not part of consensus
                 'view': self.pbft.view
             }
-            self.broadcast(block_sync, exclude_self=True)
+            self.message_handler.broadcast(block_sync, exclude_self=True)
             
             return new_block
 
@@ -1468,7 +1414,7 @@ class PBFTNode:
             'request_id': request_id,
             'is_valid': is_valid
         }
-        self.broadcast(validation_msg)
+        self.message_handler.broadcast(validation_msg)
         
         # Also process our own validation result
         self.handle_validation_result(validation_msg)
@@ -1608,7 +1554,7 @@ class PBFTNode:
                 'view': view,
                 'request_id': request_id
             }
-            self.broadcast(validation_failed_msg)
+            self.message_handler.broadcast(validation_failed_msg)
 
     def handle_validation_failed(self, message: Dict):
         """Handle notification that an operation failed validation"""
@@ -1865,7 +1811,7 @@ class PBFTNode:
         
         # Broadcast request to all nodes
         self.logger.debug(f"[CONSENSUS_V{version}] Broadcasting request.")
-        self.broadcast(request)
+        self.message_handler.broadcast(request)
         
         # Start consensus
         self.logger.debug(f"[CONSENSUS_V{version}] Calling pbft.start_consensus.")

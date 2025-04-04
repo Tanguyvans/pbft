@@ -93,7 +93,7 @@ class PBFT:
         self.pre_prepare_log[key] = pre_prepare
         
         # Broadcast pre-prepare message
-        self.node.broadcast(pre_prepare)
+        self.node.message_handler.broadcast(pre_prepare)
         self.logger.info(f"Sent pre-prepare for request {request_id}, seq {seq_num}")
         
         # Primary also processes its own pre-prepare message
@@ -156,7 +156,7 @@ class PBFT:
             self.prepare_log[key] = {}
         self.prepare_log[key][self.node_id] = prepare
         
-        self.node.broadcast(prepare)
+        self.node.message_handler.broadcast(prepare)
         self.logger.info(f"Sent prepare for seq {seq}")
         
         # Process the prepare message locally
@@ -201,7 +201,7 @@ class PBFT:
                     self.commit_log[key] = {}
                 self.commit_log[key][self.node_id] = commit
                 
-                self.node.broadcast(commit)
+                self.node.message_handler.broadcast(commit)
                 self.logger.info(f"Sent commit for seq {sequence}")
     
     def process_commit(self, message: Dict):
@@ -289,7 +289,7 @@ class PBFT:
             self.pre_prepare_log[key] = pre_prepare
             
             # Broadcast pre-prepare message
-            self.node.broadcast(pre_prepare)
+            self.node.message_handler.broadcast(pre_prepare)
             self.logger.info(f"Sent pre-prepare for request {request_id}, seq {seq_num}")
             
             # Primary also processes its own pre-prepare message
@@ -345,7 +345,7 @@ class PBFT:
             self.view_change_log[new_view] = {}
         self.view_change_log[new_view][self.node_id] = view_change_msg
         
-        self.node.broadcast(view_change_msg)
+        self.node.message_handler.broadcast(view_change_msg)
         self.logger.info(f"Sent view-change message for view {new_view}")
 
     def get_prepared_requests(self):
@@ -402,7 +402,7 @@ class PBFT:
                 }
                 
                 # Broadcast new-view message
-                self.node.broadcast(new_view_msg)
+                self.node.message_handler.broadcast(new_view_msg)
                 
                 # Install the new view
                 self.install_new_view(new_view)
@@ -424,7 +424,7 @@ class PBFT:
         
         # Store and broadcast the new-view message
         self.new_view_log[new_view] = new_view_msg
-        self.node.broadcast(new_view_msg)
+        self.node.message_handler.broadcast(new_view_msg)
         self.logger.info(f"Sent new-view message for view {new_view}")
         
         # Update to the new view
@@ -503,7 +503,7 @@ class PBFT:
             'timestamp': time.time()
         }
         
-        self.node.broadcast(heartbeat_msg)
+        self.node.message_handler.broadcast(heartbeat_msg)
         self.logger.debug(f"Primary sent heartbeat for view {self.view}")
         
         # Schedule the next heartbeat
