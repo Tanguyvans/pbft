@@ -16,6 +16,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from flowerclient import FlowerClient
 
+from components.message_types import MessageType
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
@@ -52,7 +54,7 @@ class PBFTClient:
         timestamp = int(time.time() * 1000)
         
         request = {
-            'type': 'request',
+            'type': MessageType.REQUEST,
             'client_id': self.client_id,
             'timestamp': timestamp,
             'operation': operation,
@@ -121,7 +123,7 @@ class PBFTClient:
             
             # Include client connection info for response
             request = {
-                'type': 'model-request',
+                'type': MessageType.MODEL_REQUEST,
                 'client_id': self.client_id,
                 'timestamp': timestamp,
                 'operation': operation,
@@ -412,12 +414,6 @@ class PBFTClient:
                 traceback.print_exc()
                 # Ensure we return None if training fails before saving/sending
                 return None, None, None, None # Modified return on exception
-
-            # Check if training completed successfully before proceeding
-            if best_model_state is None:
-                 print("Training failed, best model state not found.")
-                 # Return version as None too
-                 return None, None, None, None 
 
         except Exception as e:
             print(f"Error in train method: {str(e)}")

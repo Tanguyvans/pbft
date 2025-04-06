@@ -7,13 +7,364 @@ import traceback
 import numpy as np
 import threading
 import socket
-from typing import Dict
+from typing import Dict, Optional, List, Tuple
 import logging
+import torch.nn as nn
+
+from going_modular.model import Net
+
 class ModelManager:
-    def __init__(self, test_set):
-        self.models = {}
+    def __init__(self, node, test_set, flower_client):
+        self.node = node
+        self.logger = node.logger
         self.test_set = test_set
-        self.logger = logging.getLogger(f"Node-{self.node.node_id}")
+        self.flower_client = flower_client
+        
+        # Initialize model state
+        self.global_model_version = 1
+        self.metrics_cache = {}
+        
+        # Setup directories
+        self.models_dir = "models"
+        self.npz_dir = "models/npz"
+        os.makedirs(self.models_dir, exist_ok=True)
+        os.makedirs(self.npz_dir, exist_ok=True)
+        
+        # Prepare test data
+        self.device = torch.device("cpu")
+        self.test_data = self._prepare_test_data()
+
+    def handle_operation(self, operation: str, request: Dict, sequence: int) -> Tuple[str, bool]:
+        """Main entry point for handling model-related operations"""
+        try:
+            if operation.startswith('UPDATE_MODEL '):
+                return self._handle_model_update(operation, request)
+            elif operation == 'CREATE_GLOBAL_MODEL':
+                return self._handle_create_global()
+            elif operation.startswith('UPDATE_GLOBAL_MODEL '):
+                return self._handle_update_global(operation, request)
+            elif operation.startswith('CLUSTER_TRAIN_VALIDATE '):
+                return self._handle_cluster_validation(operation, request, sequence)
+            else:
+                return f"ERROR: Unknown operation type: {operation}", False
+        except Exception as e:
+            self.logger.error(f"Error handling operation: {e}")
+            return f"ERROR: {str(e)}", False
+
+    def _handle_model_update(self, operation: str, request: Dict) -> Tuple[str, bool]:
+        """Handle individual model updates from clients"""
+        parts = operation.split(' ')
+        if len(parts) < 5:
+            return "ERROR: Invalid UPDATE_MODEL format", False
+            
+        model_path = parts[1]
+        model_hash = parts[2]
+        training_loss = float(parts[3])
+        training_accuracy = float(parts[4])
+        client_id = request.get('client_id', 'unknown')
+        
+        # Extract version information
+        update_version = 1
+        for part in parts[5:]:
+            if part.startswith('v') and part[1:].isdigit():
+                update_version = int(part[1:])
+                break
+
+        # Verify model file and hash
+        if not self._verify_model_file(model_path, model_hash):
+            return f"ERROR: Model verification failed for {model_path}", False
+
+        # Create model metadata
+        model_update = {
+            'type': 'model_update',
+            'client_id': client_id,
+            'timestamp': int(time.time()),
+            'storage_path': model_path,
+            'hash': model_hash,
+            'training_loss': training_loss,
+            'training_accuracy': training_accuracy * 100,
+            'version': update_version,
+            'based_on_global': self.global_model_version
+        }
+
+        # Store update in state
+        with self.node.state_lock:
+            if 'model_updates' not in self.node.state:
+                self.node.state['model_updates'] = []
+            self.node.state['model_updates'].append(model_update)
+            
+            return f"MODEL_UPDATED: {client_id}, accuracy: {training_accuracy * 100:.2f}%, version: v{update_version}", True
+
+    def _handle_create_global(self) -> Tuple[str, bool]:
+        """Handle creation of initial global model"""
+        try:
+            # Create model file
+            timestamp = int(time.time())
+            model_filename = f"global_model_v1_{timestamp}.npz"
+            model_path = os.path.join(self.npz_dir, model_filename)
+            
+            # Get and save model weights
+            state_dict = self.flower_client.model.state_dict()
+            numpy_dict = {k: v.cpu().numpy() for k, v in state_dict.items()}
+            np.savez(model_path, **numpy_dict)
+            
+            # Calculate hash
+            with open(model_path, 'rb') as f:
+                model_hash = hashlib.sha256(f.read()).hexdigest()
+            
+            # Create metadata
+            model_data = {
+                'type': 'initial_model',
+                'version': 1,
+                'created_by': f"node-{self.node.node_id}",
+                'timestamp': timestamp,
+                'storage_path': model_path,
+                'hash': model_hash,
+                'architecture': 'mobilenet_v2',
+                'num_classes': 10
+            }
+            
+            with self.node.state_lock:
+                self.node.state['global_model'] = json.dumps(model_data)
+                return "GLOBAL_MODEL_CREATED", True
+                
+        except Exception as e:
+            self.logger.error(f"Error creating global model: {e}")
+            return f"ERROR: {str(e)}", False
+
+    def _handle_update_global(self, operation: str, request: Dict) -> Tuple[str, bool]:
+        """Handle global model updates after aggregation"""
+        parts = operation.split(' ')
+        if len(parts) < 4:
+            return "ERROR: Invalid UPDATE_GLOBAL_MODEL format", False
+            
+        model_path = parts[1]
+        model_hash = parts[2]
+        version = int(parts[3])
+        
+        if not self._verify_model_file(model_path, model_hash):
+            return f"ERROR: Global model verification failed", False
+            
+        model_data = request.get('model_data', {})
+        if not model_data:
+            model_data = {
+                'type': 'aggregated_model',
+                'version': version,
+                'created_by': request.get('client_id', f"node-{self.node.node_id}"),
+                'timestamp': int(time.time()),
+                'storage_path': model_path,
+                'hash': model_hash,
+                'architecture': 'mobilenet_v2',
+                'num_classes': 10
+            }
+            
+        with self.node.state_lock:
+            self.node.state['global_model'] = json.dumps(model_data)
+            self.global_model_version = version
+            return f"GLOBAL_MODEL_UPDATED: version {version}", True
+
+    def _verify_model_file(self, model_path: str, expected_hash: str) -> bool:
+        """Verify model file exists and hash matches"""
+        if not os.path.exists(model_path):
+            self.logger.error(f"Model file not found: {model_path}")
+            return False
+            
+        with open(model_path, 'rb') as f:
+            actual_hash = hashlib.sha256(f.read()).hexdigest()
+        if actual_hash != expected_hash:
+            self.logger.warning(f"Model hash verification failed!")
+            self.logger.warning(f"Expected: {expected_hash}")
+            self.logger.warning(f"Actual: {actual_hash}")
+            return False
+        return True
+
+    def _prepare_test_data(self):
+        """Prepare test data for model evaluation"""
+        try:
+            # Unpack test set directly from constructor argument
+            x_test, y_test = self.test_set
+            
+            # Convert to tensors if they aren't already
+            if not isinstance(x_test, torch.Tensor):
+                if isinstance(x_test, np.ndarray):
+                    x_test = torch.from_numpy(x_test)
+                else:
+                    x_test = torch.tensor(np.array(x_test))
+                
+            if not isinstance(y_test, torch.Tensor):
+                if isinstance(y_test, np.ndarray):
+                    y_test = torch.from_numpy(y_test)
+                else:
+                    y_test = torch.tensor(np.array(y_test))
+            
+            # Move to device
+            x_test = x_test.to(self.device)
+            y_test = y_test.to(self.device)
+            
+            self.logger.info(f"Test data prepared: x_test shape: {x_test.shape}, y_test shape: {y_test.shape}")
+            return {'x_test': x_test, 'y_test': y_test}
+            
+        except Exception as e:
+            self.logger.error(f"Error preparing test data: {e}")
+            self.logger.error(f"x_test type: {type(x_test)}, y_test type: {type(y_test)}")
+            if isinstance(x_test, np.ndarray):
+                self.logger.error(f"x_test shape: {x_test.shape}, dtype: {x_test.dtype}")
+            if isinstance(y_test, np.ndarray):
+                self.logger.error(f"y_test shape: {y_test.shape}, dtype: {y_test.dtype}")
+            raise
+    
+    def evaluate_model(self, model_path: str) -> Dict[str, float]:
+        """Evaluate a model and return its metrics"""
+        # Check cache first
+        if model_path in self.metrics_cache:
+            return self.metrics_cache[model_path]
+            
+        try:
+            # Load model
+            model = Net(num_classes=10).to(self.device)
+            state_dict = dict(np.load(model_path, allow_pickle=True))
+            model.load_state_dict({k: torch.from_numpy(v) for k, v in state_dict.items()})
+            
+            # Prepare data if not already done
+            if not hasattr(self, 'test_data') or self.test_data is None:
+                self.test_data = self._prepare_test_data()
+            
+            # Set model to evaluation mode
+            model.eval()
+            
+            # Initialize metrics
+            total_loss = 0.0
+            correct = 0
+            total = 0
+            criterion = nn.CrossEntropyLoss()
+            batch_size = 32  # Can be adjusted based on your needs
+            
+            # Evaluate in batches
+            with torch.no_grad():
+                x_test = self.test_data['x_test']
+                y_test = self.test_data['y_test']
+                
+                for i in range(0, len(x_test), batch_size):
+                    batch_x = x_test[i:i + batch_size]
+                    batch_y = y_test[i:i + batch_size]
+                    
+                    # Forward pass
+                    outputs = model(batch_x)
+                    loss = criterion(outputs, batch_y)
+                    
+                    # Accumulate loss
+                    total_loss += loss.item() * len(batch_x)
+                    
+                    # Calculate accuracy
+                    _, predicted = torch.max(outputs.data, 1)
+                    total += batch_y.size(0)
+                    correct += (predicted == batch_y).sum().item()
+                    
+            # Calculate final metrics
+            avg_loss = total_loss / total
+            accuracy = correct / total
+            
+            # Log evaluation results
+            self.logger.info(f"Model Evaluation Results for {model_path}:")
+            self.logger.info(f"- Test Loss: {avg_loss:.4f}")
+            self.logger.info(f"- Test Accuracy: {accuracy:.4f}")
+            
+            # Cache and return metrics
+            metrics = {'loss': avg_loss, 'accuracy': accuracy}
+            self.metrics_cache[model_path] = metrics
+            return metrics
+            
+        except Exception as e:
+            self.logger.error(f"Error evaluating model {model_path}: {e}")
+            self.logger.error(traceback.format_exc())
+            return {'loss': float('inf'), 'accuracy': 0.0}
+    
+    def validate_model_update(self, model_path: str, model_hash: str, 
+                            reported_loss: float, reported_accuracy: float) -> bool:
+        """Validate a model update by evaluating it on our test dataset"""
+        try:
+            # First verify the model file exists and hash matches
+            if not os.path.exists(model_path):
+                self.logger.error(f"Model file not found: {model_path}")
+                return False
+            
+            with open(model_path, 'rb') as f:
+                actual_hash = hashlib.sha256(f.read()).hexdigest()
+            if actual_hash != model_hash:
+                self.logger.error(f"Model hash mismatch. Expected: {model_hash}, Got: {actual_hash}")
+                return False
+
+            # Evaluate the update model on our test dataset
+            update_metrics = self.evaluate_model(model_path)
+            actual_loss = update_metrics['loss']
+            actual_accuracy = update_metrics['accuracy']
+            
+            # Get and evaluate current global model for comparison
+            global_model_info = self._get_global_model_info()
+            if not global_model_info:
+                self.logger.warning("No global model info available, accepting update")
+                return True
+            
+            global_model_path = global_model_info.get('storage_path')
+            global_metrics = self.evaluate_model(global_model_path)
+            
+            # Log all metrics for comparison
+            self.logger.info("Model Validation Metrics:")
+            self.logger.info(f"Global Model - Loss: {global_metrics['loss']:.4f}, Accuracy: {global_metrics['accuracy']:.4f}")
+            self.logger.info(f"Update Model - Reported - Loss: {reported_loss:.4f}, Accuracy: {reported_accuracy:.4f}")
+            self.logger.info(f"Update Model - Actual   - Loss: {actual_loss:.4f}, Accuracy: {actual_accuracy:.4f}")
+            
+            # Validation checks:
+            # 1. Verify honesty: reported metrics should be reasonably close to actual metrics
+            honesty_threshold = 0.1  # 10% tolerance
+            is_honest = (
+                abs(reported_loss - actual_loss) <= honesty_threshold * reported_loss and
+                abs(reported_accuracy - actual_accuracy) <= honesty_threshold
+            )
+            
+            # 2. Performance check: actual metrics should be comparable or better than global model
+            performance_threshold = 0.95  # Allow up to 5% degradation
+            is_performing = (
+                actual_accuracy >= global_metrics['accuracy'] * performance_threshold and
+                actual_loss <= global_metrics['loss'] * (1 + honesty_threshold)  # Allow 10% worse loss
+            )
+            
+            # Log validation checks
+            self.logger.info("Validation Checks:")
+            self.logger.info(f"Honesty Check: {'PASS' if is_honest else 'FAIL'}")
+            self.logger.info(f"Performance Check: {'PASS' if is_performing else 'FAIL'}")
+            
+            if not is_honest:
+                self.logger.warning("Model update rejected: Reported metrics don't match actual performance")
+                self.logger.warning(f"Metric gaps - Loss: {abs(reported_loss - actual_loss):.4f}, "
+                                  f"Accuracy: {abs(reported_accuracy - actual_accuracy):.4f}")
+            
+            if not is_performing:
+                self.logger.warning("Model update rejected: Performance below acceptable threshold")
+                self.logger.warning(f"Required min accuracy: {global_metrics['accuracy'] * performance_threshold:.4f}")
+                self.logger.warning(f"Required max loss: {global_metrics['loss'] * (1 + honesty_threshold):.4f}")
+            
+            # Both checks must pass for validation
+            is_valid = is_honest and is_performing
+            
+            self.logger.info(f"Final validation result: {'VALID' if is_valid else 'INVALID'}")
+            return is_valid
+            
+        except Exception as e:
+            self.logger.error(f"Error in model validation: {e}")
+            traceback.print_exc()
+            return False
+    
+    def _get_global_model_info(self) -> Optional[Dict]:
+        """Get current global model information"""
+        try:
+            with self.node.state_lock:
+                if 'global_model' in self.node.state:
+                    return json.loads(self.node.state['global_model'])
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting global model info: {e}")
+            return None
 
     def load_model(self, model_path):
         self.models[model_path] = torch.load(model_path)
@@ -27,10 +378,10 @@ class ModelManager:
         
         # Check if we have global model info in our state
         global_model_info = None
-        with self.state_lock:
-            if 'global_model' in self.state:
+        with self.node.state_lock:
+            if 'global_model' in self.node.state:
                 try:
-                    global_model_info = json.loads(self.state['global_model'])
+                    global_model_info = json.loads(self.node.state['global_model'])
                 except:
                     self.logger.error("Failed to parse global model info from state")
         
@@ -143,10 +494,10 @@ class ModelManager:
             
             # --- Get Current Global Model Info (Needed for architecture etc.) ---
             global_model_info = None
-            with self.state_lock:
-                if 'global_model' in self.state:
+            with self.node.state_lock:
+                if 'global_model' in self.node.state:
                     try:
-                        global_model_info = json.loads(self.state['global_model'])
+                        global_model_info = json.loads(self.node.state['global_model'])
                     except Exception as e:
                         self.logger.error(f"[AGG_V{version}] Failed to parse current global model info: {e}")
                         # Decide how to handle this - maybe return? For now, log and continue cautiously.
@@ -308,7 +659,7 @@ class ModelManager:
         # Create request
         request = {
             'type': 'request',
-            'client_id': f"node-{self.node_id}",
+            'client_id': f"node-{self.node.node_id}",
             'timestamp': timestamp,
             'operation': operation,
             'request_id': request_id,
@@ -318,7 +669,7 @@ class ModelManager:
         # Store request in PBFT module
         digest = hashlib.sha256(f"{request_id}:{operation}".encode()).hexdigest()
         self.pbft.store_request(request_id, {
-            'client_id': f"node-{self.node_id}",
+            'client_id': f"node-{self.node.node_id}",
             'timestamp': timestamp,
             'operation': operation,
             'digest': digest

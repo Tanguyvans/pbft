@@ -3,6 +3,8 @@ import threading
 from typing import Dict
 import time
 
+from components.message_types import MessageType
+
 class PBFT:
     def __init__(self, node_id: int, total_nodes: int, node):
         self.node_id = node_id
@@ -80,7 +82,7 @@ class PBFT:
         
         # Create pre-prepare message
         pre_prepare = {
-            'type': 'pre-prepare',
+            'type': MessageType.PRE_PREPARE,
             'view': self.view,
             'sequence': seq_num,
             'digest': request['digest'],
@@ -106,17 +108,17 @@ class PBFT:
         # Record activity for any message type
         self.record_activity()
         
-        if msg_type == 'pre-prepare':
+        if msg_type == MessageType.PRE_PREPARE:
             self.process_pre_prepare(message)
-        elif msg_type == 'prepare':
+        elif msg_type == MessageType.PREPARE:
             self.process_prepare(message)
-        elif msg_type == 'commit':
+        elif msg_type == MessageType.COMMIT:
             self.process_commit(message)
-        elif msg_type == 'view-change':
+        elif msg_type == MessageType.VIEW_CHANGE:
             self.process_view_change(message)
-        elif msg_type == 'new-view':
+        elif msg_type == MessageType.NEW_VIEW:
             self.process_new_view(message)
-        elif msg_type == 'heartbeat':
+        elif msg_type == MessageType.HEARTBEAT:
             # Just record activity, no further processing needed
             pass
     
@@ -143,7 +145,7 @@ class PBFT:
         
         # Create and send prepare message
         prepare = {
-            'type': 'prepare',
+            'type': MessageType.PREPARE,
             'view': view,
             'sequence': seq,
             'global_sequence': global_seq,
@@ -188,7 +190,7 @@ class PBFT:
             # We have enough prepare messages, send commit
             if key not in self.commit_log or self.node_id not in self.commit_log[key]:
                 commit = {
-                    'type': 'commit',
+                    'type': MessageType.COMMIT,
                     'view': view,
                     'sequence': sequence,
                     'digest': digest,
@@ -276,7 +278,7 @@ class PBFT:
             
             # Create pre-prepare message
             pre_prepare = {
-                'type': 'pre-prepare',
+                'type': MessageType.PRE_PREPARE,
                 'view': self.view,
                 'sequence': seq_num,
                 'digest': request['digest'],
@@ -395,7 +397,7 @@ class PBFT:
                 
                 # Create new-view message
                 new_view_msg = {
-                    'type': 'new-view',
+                    'type': MessageType.NEW_VIEW,
                     'view': new_view,
                     'sender': self.node_id,
                     'view_changes': list(self.view_change_log[new_view].keys())
@@ -416,7 +418,7 @@ class PBFT:
         
         # Create new-view message
         new_view_msg = {
-            'type': 'new-view',
+            'type': MessageType.NEW_VIEW,
             'view': new_view,
             'view_changes': list(view_changes.values()),  # Include all view-change messages
             'sender': self.node_id
@@ -497,7 +499,7 @@ class PBFT:
             return
         
         heartbeat_msg = {
-            'type': 'heartbeat',
+            'type': MessageType.HEARTBEAT,
             'view': self.view,
             'sender': self.node_id,
             'timestamp': time.time()
