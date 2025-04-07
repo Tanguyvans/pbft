@@ -98,38 +98,72 @@ class ModelManager:
     def _handle_create_global(self) -> Tuple[str, bool]:
         """Handle creation of initial global model"""
         try:
-            # Create model file
+            # --- Simple Save with Delay ---
             timestamp = int(time.time())
             model_filename = f"global_model_v1_{timestamp}.npz"
-            model_path = os.path.join(self.npz_dir, model_filename)
-            
-            # Get and save model weights
-            state_dict = self.flower_client.model.state_dict()
-            numpy_dict = {k: v.cpu().numpy() for k, v in state_dict.items()}
-            np.savez(model_path, **numpy_dict)
-            
-            # Calculate hash
-            with open(model_path, 'rb') as f:
-                model_hash = hashlib.sha256(f.read()).hexdigest()
-            
-            # Create metadata
+            final_model_path = os.path.join(self.npz_dir, model_filename)
+            saved_successfully = False
+
+            try:
+                # Ensure the target directory exists
+                os.makedirs(self.npz_dir, exist_ok=True)
+
+                # Get model weights
+                state_dict = self.flower_client.model.state_dict()
+                numpy_dict = {k: v.cpu().numpy() for k, v in state_dict.items()}
+
+                # Save directly using np.savez
+                np.savez(final_model_path, **numpy_dict)
+                self.logger.info(f"Initial global model saved to: {final_model_path}")
+
+                # *** Add a small delay to allow filesystem writes to complete ***
+                time.sleep(0.2)
+                self.logger.debug("Short delay after np.savez complete.")
+
+                saved_successfully = True
+
+            except Exception as e:
+                 self.logger.error(f"Failed to save initial global model NPZ: {e}")
+                 # Clean up potentially partially written file if it exists
+                 if os.path.exists(final_model_path):
+                     try:
+                         os.remove(final_model_path)
+                     except OSError as rm_err:
+                         self.logger.error(f"Error removing file {final_model_path}: {rm_err}")
+                 return f"ERROR: Failed to save initial model file", False
+
+            # --- Calculate hash ---
+            model_hash = ""
+            try:
+                with open(final_model_path, 'rb') as f:
+                    model_hash = hashlib.sha256(f.read()).hexdigest()
+                self.logger.info(f"Calculated hash for {final_model_path}: {model_hash[:10]}...")
+            except Exception as e:
+                self.logger.error(f"Failed to read model file for hashing: {e}")
+                return f"ERROR: Failed read model file after saving", False
+
+            # --- Create metadata ---
             model_data = {
                 'type': 'initial_model',
                 'version': 1,
                 'created_by': f"node-{self.node.node_id}",
                 'timestamp': timestamp,
-                'storage_path': model_path,
+                'storage_path': final_model_path,
                 'hash': model_hash,
-                'architecture': 'mobilenet_v2',
-                'num_classes': 10
+                'architecture': 'mobilenet_v2', # TODO: Get dynamically if needed
+                'num_classes': 10 # TODO: Get dynamically if needed
             }
-            
+
+            # --- Update state ---
             with self.node.state_lock:
                 self.node.state['global_model'] = json.dumps(model_data)
-                return "GLOBAL_MODEL_CREATED", True
-                
+            self.logger.info(f"Node state updated with global model v1 info.")
+
+            return "GLOBAL_MODEL_CREATED", True
+
         except Exception as e:
             self.logger.error(f"Error creating global model: {e}")
+            traceback.print_exc() # Print traceback for unexpected errors
             return f"ERROR: {str(e)}", False
 
     def _handle_update_global(self, operation: str, request: Dict) -> Tuple[str, bool]:

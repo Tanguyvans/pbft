@@ -78,6 +78,8 @@ class PBFTNode:
         
         self.logger.info(f"Node {self.node_id} started on {self.host}:{self.port}")
 
+        self.is_primary = self.pbft.is_primary_node()
+
         # Add a longer delay before the primary node creates the initial global model
         if self.pbft.is_primary_node():
             # Schedule the creation of the initial model after a longer delay

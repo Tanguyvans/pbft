@@ -41,6 +41,10 @@ class PBFT:
         self.heartbeat_interval = 2.0  # Send heartbeat every 2 seconds
         self.heartbeat_timer = None
         
+        # View change messages
+        self.view_change_messages = {}
+        self.new_view_message = None
+        
         # Start the view change timer
         self.reset_view_change_timer()
         
@@ -317,38 +321,57 @@ class PBFT:
         if not self.changing_view:
             self.reset_view_change_timer()
 
-    def initiate_view_change(self):
-        """Initiate a view change when the primary is suspected to be faulty"""
-        # Check if there has been recent activity
-        if time.time() - self.last_activity_time < self.view_change_timeout:
-            self.reset_view_change_timer()
+    def initiate_view_change(self, reason=None):
+        """Initiate a view change process."""
+        if self.in_view_change:
+            self.logger.debug("Already in view change process.")
             return
-        
-        # Don't initiate if we're already changing view
-        if self.changing_view:
-            return
-        
-        self.changing_view = True
-        new_view = self.view + 1
-        self.logger.warning(f"Initiating view change to view {new_view}")
-        
-        # Create view-change message
+
+        self.in_view_change = True
+        self.view += 1
+        self.logger.warning(f"Initiating view change to view {self.view} (Reason: {reason or 'timeout'})")
+
+        # Stop heartbeat timer if running (especially if we were primary)
+        if hasattr(self, 'heartbeat_timer') and self.heartbeat_timer:
+            self.heartbeat_timer.cancel()
+
+        # Reset view change state for the new view
+        self.view_change_messages.setdefault(self.view, {})
+        self.new_view_message = None
+
+        # Prepare the VIEW-CHANGE message
+        prepared_proof = self._collect_prepared_proof()
         view_change_msg = {
-            'type': 'view-change',
-            'new_view': new_view,
-            'last_seq': self.sequence_number,
+            'type': MessageType.VIEW_CHANGE,
+            'new_view': self.view,
+            'last_seq': self.sequence_number, # Or the sequence number of the last stable checkpoint
             'sender': self.node_id,
-            # Include information about prepared requests
-            'prepared': self.get_prepared_requests()
+            'prepared': prepared_proof, # Include proof of prepared messages
+            'reason': reason or 'timeout' # Include the reason
         }
-        
-        # Store and broadcast the view-change message
-        if new_view not in self.view_change_log:
-            self.view_change_log[new_view] = {}
-        self.view_change_log[new_view][self.node_id] = view_change_msg
-        
+
+        # Process the message locally first (to store it)
+        self.process_message(view_change_msg)
+
+        # Broadcast the VIEW-CHANGE message
         self.node.message_handler.broadcast(view_change_msg)
-        self.logger.info(f"Sent view-change message for view {new_view}")
+        self.logger.info(f"Sent view-change message for view {self.view}")
+
+        # Start view change timer if needed (to re-broadcast or advance view again)
+        # self.start_view_change_timer() # Optional: Implement timer logic
+
+    def _collect_prepared_proof(self):
+        """Collects proof for prepared messages (simplified)."""
+        # In a full implementation, this would gather messages from the PREPARE phase
+        # for requests that completed PREPARE but not COMMIT in the previous view.
+        # For now, returning an empty dict as a placeholder.
+        prepared = {}
+        # Example: Iterate through self.prepare_log or similar structure
+        # for seq, log_entry in self.prepare_log.items():
+        #   if log_entry['view'] == self.view - 1 and len(log_entry['proof']) >= 2*self.f:
+        #       prepared[seq] = log_entry # Or just the necessary proof components
+        self.logger.debug("Collecting prepared proof (currently simplified)")
+        return prepared
 
     def get_prepared_requests(self):
         """Get information about prepared requests for view change"""
