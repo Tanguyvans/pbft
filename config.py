@@ -12,6 +12,7 @@ settings = {
     "check_usefulness": True,
     "coef_useful": 1.05,   # 1.05
     "tolerance_ceil": 0.08,
+    "data_root": "./Data/",
 
     "poisoned_number": 0,
     "n_rounds": 50,

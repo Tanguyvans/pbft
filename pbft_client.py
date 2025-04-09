@@ -28,7 +28,6 @@ class PBFTClient:
         self.logger = logging.getLogger(f"Client-{self.client_id}")
         self.request_count = 0
 
-
         x_train, y_train = client_train_set
         x_test, y_test = client_test_set        
 

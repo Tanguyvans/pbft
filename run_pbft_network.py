@@ -1,12 +1,9 @@
 import time
 import threading
-import random
 import logging
 import json
-
 import types
 
-from going_modular.utils import initialize_parameters
 from going_modular.data_setup import load_dataset
 from config import settings
 
@@ -58,89 +55,43 @@ def send_concurrent_requests(clients, operations):
 
 def main():
     logging.basicConfig(level=logging.DEBUG)
-    training_barrier, length = initialize_parameters(settings)
-
-    print(training_barrier, length)
 
     num_nodes = settings['number_of_nodes']
-    num_clients = 24
+    num_clients = 9
     base_port = 10000
+    check_sensorship = True
+    next_node_id = num_nodes
+    cluster_size = 3
+    last_processed_global_model_version = 0
 
-    (client_train_sets, client_test_sets, node_test_sets, list_classes) = load_dataset(length, settings['name_dataset'],
-                                                                                    settings['data_root'],
-                                                                                    num_clients, # Pass the updated count
-                                                                                    settings['number_of_nodes'])
+    # --- Load Dataset with Subsetting ---
+    max_samples = 180 # Increased from 10
+    logger.info(f"Loading dataset '{settings['name_dataset']}' with max {max_samples} samples per set...")
+    (client_train_sets, client_test_sets, node_test_sets, list_classes) = load_dataset(
+        name_dataset=settings['name_dataset'],
+        data_root=settings['data_root'],
+        number_of_clients=num_clients,
+        number_of_nodes=num_nodes,
+        max_samples_per_set=max_samples # Pass the new argument
+    )
+    logger.info("Dataset loading complete.")
 
-    # Ensure we have enough data splits
-    if len(client_train_sets) < num_clients or len(client_test_sets) < num_clients:
-        logger.error(f"Insufficient data splits loaded ({len(client_train_sets)} train, {len(client_test_sets)} test) for {num_clients} clients.")
-        return
-
-    nodes_config = []
-    for i in range(num_nodes):
-        nodes_config.append({
-            'id': i,
-            'host': 'localhost',
-            'port': base_port + i
-        })
-    
-    # Start nodes
-    nodes = []
-    for i in range(num_nodes):
-        # Ensure node_test_sets has enough entries if needed, reusing [0] might be okay for simulation
-        test_set_index = i if i < len(node_test_sets) else 0
-        node = PBFTNode(
-            node_id=i,
-            host='localhost',
-            port=base_port + i,
-            nodes_config=nodes_config,
-            test_set=node_test_sets[test_set_index] # Use appropriate test set
-        )
-        nodes.append(node)
-        logger.info(f"Started node {i} on port {base_port + i}")
-    
-    # Give nodes time to start AND for the primary to create the initial global model
+    # Create nodes
+    nodes_config, nodes = create_nodes(num_nodes, base_port, node_test_sets)
     logger.info("Waiting for nodes to start and initial global model creation (v1)...")
-    time.sleep(5) # Increased from 2 to 5 seconds
+    time.sleep(5)
     logger.info("Initial wait finished.")
-    
+
     # Create clients
-    clients = []
-    # Assuming data loader provides enough sets for num_clients
-    for i in range(num_clients):
-        # Use smaller data slices for quicker simulation if needed
-        train_data_slice = client_train_sets[i][:100] # Example: Use first 100 samples
-        test_data_slice = client_test_sets[i][:100]  # Example: Use first 100 samples
-        logger.info(f"Client {i} using {len(train_data_slice)} training samples and {len(test_data_slice)} test samples.")
-        client = PBFTClient(
-            client_id=f"client{i}",
-            nodes_config=nodes_config,
-            client_train_set=train_data_slice,
-            client_test_set=test_data_slice
-            )
-        clients.append(client)
+    clients = create_clients(num_clients, client_train_sets, client_test_sets, nodes_config)
     logger.info(f"Created {len(clients)} clients.")
     
-    # Start a timer to periodically check for censored requests
-    def start_censorship_check():
-        while True:
-            try:
-                for node in nodes:
-                    if node.running and not node.pbft.is_primary_node():
-                        node.check_for_censored_requests()
-            except Exception as e:
-                logger.error(f"Error in censorship check: {e}")
-            time.sleep(10)  # Check every 10 seconds
-    
-    censorship_thread = threading.Thread(target=start_censorship_check)
-    censorship_thread.daemon = True
-    censorship_thread.start()
+    if check_sensorship:
+        censorship_thread = threading.Thread(target=start_censorship_check, args=(nodes,))
+        censorship_thread.daemon = True
+        censorship_thread.start()
     
     try:
-        next_node_id = num_nodes
-        cluster_size = 3 # Define cluster size
-        last_processed_global_model_version = 0 # Track the last version we triggered training for
-
         while True:
             print("\nPBFT Blockchain Network Menu:")
             print("1. Add a new element to the chain (Manual SET/GET/DELETE)")
@@ -186,7 +137,6 @@ def main():
             elif choice == MENU_EXIT:
                 break
             else:
-                # Adjust the invalid choice message
                 print(f"Invalid choice. Please enter a number between 1 and 13.")
 
     except KeyboardInterrupt:
@@ -195,6 +145,71 @@ def main():
         logger.info("Shutting down PBFT network...")
         for node in nodes:
             node.message_handler.stop()
+
+def create_nodes(num_nodes, base_port, node_test_sets):
+    nodes_config = []
+    for i in range(num_nodes):
+        nodes_config.append({
+            'id': i,
+            'host': 'localhost',
+            'port': base_port + i
+        })
+    
+    # Start nodes
+    nodes = []
+    for i in range(num_nodes):
+        # Ensure node_test_sets has enough entries if needed, reusing [0] might be okay for simulation
+        test_set_index = i if i < len(node_test_sets) else 0
+        node = PBFTNode(
+            node_id=i,
+            host='localhost',
+            port=base_port + i,
+            nodes_config=nodes_config,
+            test_set=node_test_sets[test_set_index] # Use appropriate test set
+        )
+        nodes.append(node)
+        logger.info(f"Started node {i} on port {base_port + i}")
+
+    return nodes_config, nodes
+
+def create_clients(num_clients, client_train_sets, client_test_sets, nodes_config):
+    # Create clients
+    clients = []
+    # Assuming data loader provides enough sets for num_clients
+    for i in range(num_clients):
+        # Remove the redundant [:100] slicing here
+        train_data_slice = client_train_sets[i] # Removed [:100]
+        test_data_slice = client_test_sets[i]  # Removed [:100]
+        # Ensure data slices are not empty before logging length if necessary
+        train_len = len(train_data_slice[0]) if train_data_slice and len(train_data_slice) > 0 else 0
+        test_len = len(test_data_slice[0]) if test_data_slice and len(test_data_slice) > 0 else 0
+        logger.info(f"Client {i} using {train_len} training samples and {test_len} test samples.")
+
+        # Add a check to prevent initializing client with empty data that will fail split
+        if train_len < 2: # Need at least 2 samples for train_test_split
+             logger.warning(f"Client {i} has only {train_len} training samples. Skipping client creation.")
+             continue # Skip this client
+
+        client = PBFTClient(
+            client_id=f"client{i}",
+            nodes_config=nodes_config,
+            # Pass the data directly (should be [list_of_tensors, list_of_labels])
+            client_train_set=train_data_slice,
+            client_test_set=test_data_slice
+            )
+        clients.append(client)
+
+    return clients
+
+def start_censorship_check(nodes):
+    while True:
+        try:
+            for node in nodes:
+                if node.running and not node.pbft.is_primary_node():
+                    node.check_for_censored_requests()
+        except Exception as e:
+            logger.error(f"Error in censorship check: {e}")
+        time.sleep(10)
 
 def _handle_manual_request(clients):
     operation_type = input("Enter operation type (SET/GET/DELETE): ").upper()
@@ -684,20 +699,28 @@ def run_cluster_training(cluster_clients, cluster_id, base_global_model_version)
         agg_model_hash = ""
         with open(agg_model_path, 'rb') as f: agg_model_hash = hashlib.sha256(f.read()).hexdigest()
 
-        # --- Send Validation Request ---
-        client_ids_str = json.dumps(client_ids)
-        operation = (f"CLUSTER_TRAIN_VALIDATE cluster_id={cluster_id} "
-                        f"aggregated_model_path='{agg_model_path}' "
-                        f"aggregated_model_hash='{agg_model_hash}' "
-                        f"client_ids='{client_ids_str}' "
-                        f"global_model_version={base_global_model_version}") # Use the base version
+        if agg_model_hash: # Check if hash calculation succeeded
+            # --- Send Validation Request ---
+            client_ids_str = json.dumps(client_ids)
+            operation = (f"CLUSTER_TRAIN_VALIDATE cluster_id={cluster_id} "
+                         f"aggregated_model_path='{agg_model_path}' " # Use final path
+                         f"aggregated_model_hash='{agg_model_hash}' "
+                         f"client_ids='{client_ids_str}' "
+                         f"global_model_version={base_global_model_version}")
 
-        logger.info(f"[Cluster {cluster_id}] Sending validation request: {operation}")
-        # Use the first client of the *entire simulation* (client 0) to send the request
-        clients[0].send_request(operation)
-        time.sleep(2) # Small delay after sending request
+            logger.info(f"[Cluster {cluster_id}] Sending validation request: {operation}")
+            # --- Use the first client *of this specific cluster* ---
+            if cluster_clients: # Ensure the cluster list isn't empty
+                 # Change clients[0] to cluster_clients[0]
+                 cluster_clients[0].send_request(operation)
+                 time.sleep(2) # Small delay after sending request
+            else:
+                 # This case should be unlikely if all_successful_in_cluster is True
+                 logger.error(f"[Cluster {cluster_id}] Cannot send validation request: Cluster client list is empty.")
+        else:
+             logger.error(f"[Cluster {cluster_id}] Could not calculate hash for saved model. Validation request NOT sent.")
     else:
-        logger.warning(f"[Cluster {cluster_id}] Training incomplete or failed. No aggregation or validation request sent.")
+         logger.warning(f"[Cluster {cluster_id}] Training incomplete or failed. No aggregation or validation request sent.")
 
 def _handle_check_model_and_train_cluster(clients, nodes, cluster_size, last_processed_global_model_version):
     logger.info("Checking for new global model version...")

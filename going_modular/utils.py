@@ -11,17 +11,6 @@ import threading
 from collections import OrderedDict
 from typing import List
 
-
-def initialize_parameters(settings):
-    settings["data_root"] = "Data"
-    settings["save_results"] = f"results/pbft/"
-    settings["save_model"] = f"models/pbft/"
-
-    training_barrier = threading.Barrier(settings['number_of_clients'])
-
-    os.makedirs(settings["save_results"], exist_ok=True)
-    return training_barrier, None
-
 def sMAPE(outputs, targets):
     """
     Symmetric Mean Absolute Percentage Error (sMAPE) for evaluating the model.
